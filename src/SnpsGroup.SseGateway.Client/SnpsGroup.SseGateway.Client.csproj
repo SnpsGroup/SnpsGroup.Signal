@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Platforms>x64</Platforms>
+
+    <!-- NuGet packaging -->
+    <IsPackable>true</IsPackable>
+    <PackageId>SnpsGroup.SseGateway.Client</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>SnpsGroup</Authors>
+    <Company>SnpsGroup</Company>
+    <Product>SnpsGroup.SseGateway.Client</Product>
+    <Description>Client library for publishing events to the SnpsGroup SSE Gateway Redis Stream. Used by producer applications (e.g., DFE API) to push real-time events through a centralized SSE gateway.</Description>
+    <PackageTags>sse;redis;event-streaming;snpsgroup</PackageTags>
+    <RepositoryUrl>https://github.com/SnpsGroup/SnpsGroup.Signal</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Options" Version="10.0.8" />
+    <PackageReference Include="StackExchange.Redis" Version="2.11.8" />
+  </ItemGroup>
+
+</Project>

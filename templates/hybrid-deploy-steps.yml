@@ -1,0 +1,438 @@
+# templates/hybrid-deploy-steps.yml
+# Template de deployment para arquitetura híbrida (YAML + Deployment Groups)
+#
+# CARACTERÍSTICAS ESPECIAIS:
+# 1. Funciona tanto com deployment groups quanto environments normais
+# 2. Suporte a rolling deployments automáticos
+# 3. Health checks distribuídos por VM
+# 4. Backup automático com rollback
+# 5. Logging verboso para troubleshooting
+# 6. Otimizado para downtime mínimo (Blue-Green)
+
+parameters:
+# PARÂMETROS OBRIGATÓRIOS: Sempre devem ser fornecidos
+- name: environment
+  type: string    # staging, production
+  
+- name: fullVersion  
+  type: string    # 1.0.5
+  
+- name: websiteName
+  type: string    # AdaptiveSignal, StageAdaptiveSignal
+
+- name: appPoolName
+  type: string    # AdaptiveSignal, StageAdaptiveSignal
+
+- name: domainName
+  type: string    # signal.snpsgroup.com, stage-signal.snpsgroup.com
+
+# PARÂMETROS OPCIONAIS: Têm valores padrão
+- name: deploymentType
+  type: string
+  default: 'standard'    # standard, staging, production
+  
+- name: vmName
+  type: string
+  default: '$(Agent.MachineName)' # Nome da VM atual
+  
+- name: skipBackup
+  type: boolean
+  default: false    # true para pular backup (dev/test)
+  
+- name: healthCheckRetries
+  type: number  
+  default: 3    # Quantas tentativas de health check
+  
+- name: healthCheckDelay
+  type: number
+  default: 10    # Segundos entre tentativas
+
+- name: repository
+  type: string    # Nome do repositório: SnpsGroup.Signal
+  default: 'SnpsGroup.Signal'
+
+- name: mainCsproj
+  type: string    # Nomeo do projeto principal, que vai dar origem ao pacote
+  default: ''
+
+steps:
+
+# ====
+# STEP 1: PREPARAÇÃO E VALIDAÇÃO (Sem alterações)
+# ====
+- checkout: none
+
+- task: PowerShell@2
+  displayName: '📋 Deployment Information'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== DEPLOYMENT STARTING ==="
+      Write-Host "Environment: ${{ parameters.environment }}"
+      Write-Host "Version: ${{ parameters.fullVersion }}"
+      Write-Host "VM: ${{ parameters.vmName }}"
+      Write-Host "Website: ${{ parameters.websiteName }}"
+      Write-Host "App Pool: ${{ parameters.appPoolName }}"
+      Write-Host "Domain: ${{ parameters.domainName }}"
+      Write-Host "Repository: ${{ parameters.repository }}"
+      Write-Host "Agent: $(Agent.Name)"
+      Write-Host "Timestamp: $(Get-Date)"
+      Write-Host ""
+      Write-Host "=== SYSTEM INFORMATION ==="
+      Write-Host "Computer: $env:COMPUTERNAME"
+      Write-Host "User: $env:USERNAME"  
+      Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
+      Write-Host "OS: $(Get-WmiObject Win32_OperatingSystem | Select-Object -ExpandProperty Caption)"
+      Write-Host "Free Disk Space: $([math]::Round((Get-WmiObject Win32_LogicalDisk -Filter "DeviceID='C:'").FreeSpace / 1GB, 2)) GB"
+      Write-Host ""
+
+- download: current
+  artifact: ${{ parameters.repository }}
+  displayName: '📦 Download Application Artifacts'
+
+- download: current
+  artifact: 'DeploymentScripts'
+  displayName: '📜 Download Deployment Scripts'
+
+- task: PowerShell@2
+  displayName: '🔍 Pre-deployment Validation'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== PRE-DEPLOYMENT VALIDATION ==="
+      $artifactPath = "$(Pipeline.Workspace)/${{ parameters.repository }}"
+      $scriptsPath = "$(Pipeline.Workspace)/DeploymentScripts"
+      Write-Host "Checking artifacts..."
+      if (!(Test-Path $artifactPath)) { throw "Application artifacts not found: $artifactPath" }
+      $artifactFiles = Get-ChildItem -Path $artifactPath -Recurse -File
+      Write-Host "✅ Artifacts found: $($artifactFiles.Count) files"
+      Write-Host "Checking deployment scripts..."
+      if (!(Test-Path $scriptsPath)) { throw "Deployment scripts not found: $scriptsPath" }
+      $essentialFiles = @("appsettings.json", "${{ parameters.websiteName }}.dll")
+      foreach ($file in $essentialFiles) {
+        $filePath = Join-Path $artifactPath $file
+        if (Test-Path $filePath) { Write-Host "✅ Found: $file" } else { Write-Host "⚠️ Missing: $file" }
+      }
+      Write-Host "Checking PowerShell modules..."
+      $requiredModules = @("WebAdministration", "IISAdministration")
+      foreach ($module in $requiredModules) {
+        try { Import-Module $module -ErrorAction Stop; Write-Host "✅ Module available: $module" }
+        catch { throw "Required PowerShell module not available: $module" }
+      }
+      Write-Host "✅ Pre-deployment validation completed successfully"
+    errorActionPreference: 'stop'
+
+# ====
+# STEP 2: CONFIGURAÇÃO DO IIS (Sem alterações)
+# ====
+- task: PowerShell@2
+  displayName: '🔧 Configure IIS Infrastructure'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== IIS CONFIGURATION ==="
+      $iisScriptPath = "$(Pipeline.Workspace)/DeploymentScripts/Initialize-SnpsGroupIIS.ps1"
+      if (!(Test-Path $iisScriptPath)) { throw "IIS configuration script not found: $iisScriptPath" }
+      Write-Host "Importing IIS configuration script..."
+      . $iisScriptPath
+      $versionSuffix = if ("${{ parameters.environment }}" -eq "Production") { "400" } else { "200" }
+      $fullVersionWithSuffix = "${{ parameters.fullVersion }}.$versionSuffix"
+      Write-Host "Configuring IIS for environment: ${{ parameters.environment }}"
+      Write-Host "Full version: $fullVersionWithSuffix"
+      $versionApiUrl = "$(versionApiUrl)"
+      $certificatePasswordSecure = ConvertTo-SecureString -String "$(certificatePassword)" -AsPlainText -Force
+      $iisResult = Initialize-SnpsGroupIIS -Environment "${{ parameters.environment }}" -Version "${{ parameters.fullVersion }}" -VersionApiUrl $versionApiUrl -CertificatePassword $certificatePasswordSecure
+      if (!$iisResult.Success) { throw "IIS configuration failed: $($iisResult.Error)" }
+      Write-Host "✅ IIS configured successfully"
+      Write-Host "Website: $($iisResult.WebsiteName)"
+      Write-Host "Physical Path: $($iisResult.PhysicalPath)"
+      Write-Host "##vso[task.setvariable variable=DeploymentPath]$($iisResult.PhysicalPath)"
+      Write-Host "##vso[task.setvariable variable=FullVersionWithSuffix]$fullVersionWithSuffix"
+    errorActionPreference: 'stop'
+
+# ====
+# STEP 3: BACKUP DA VERSÃO ATUAL (Sem alterações)
+# ====
+- task: PowerShell@2
+  displayName: '💾 Backup Current Version'
+  condition: and(succeeded(), eq('${{ parameters.skipBackup }}', 'false'))
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== BACKUP CURRENT VERSION ==="
+      Import-Module WebAdministration
+      $website = Get-Website -Name "${{ parameters.websiteName }}" -ErrorAction SilentlyContinue
+      if (!$website) { Write-Host "⚠️ Website ${{ parameters.websiteName }} not found - skipping backup"; exit 0 }
+      $currentPath = $website.PhysicalPath
+      Write-Host "Current website path: $currentPath"
+      if (!(Test-Path $currentPath)) { Write-Host "⚠️ Current path does not exist - skipping backup"; exit 0 }
+      $backupDir = "C:\AzureDevops\Backups\${{ parameters.environment }}"
+      if (!(Test-Path $backupDir)) { New-Item -Path $backupDir -ItemType Directory -Force | Out-Null; Write-Host "Created backup directory: $backupDir" }
+      $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+      $backupName = "backup-${{ parameters.fullVersion }}-$timestamp"
+      $backupPath = Join-Path $backupDir $backupName
+      Write-Host "Creating backup: $backupPath"
+      try {
+        Copy-Item -Path $currentPath -Destination $backupPath -Recurse -Force
+        $backupFiles = Get-ChildItem -Path $backupPath -Recurse -File
+        Write-Host "✅ Backup created: $($backupFiles.Count) files backed up"
+        Write-Host "##vso[task.setvariable variable=BackupPath]$backupPath"
+        $oldBackups = Get-ChildItem -Path $backupDir -Directory | Where-Object { $_.Name -like "backup-*" } | Sort-Object CreationTime -Descending | Select-Object -Skip 5
+        if ($oldBackups) {
+          Write-Host "Cleaning up old backups..."
+          $oldBackups | ForEach-Object { Remove-Item -Path $_.FullName -Recurse -Force; Write-Host "Removed old backup: $($_.Name)" }
+        }
+      }
+      catch { Write-Warning "Backup failed: $($_.Exception.Message)"; Write-Warning "Deployment will continue without backup" }
+    errorActionPreference: 'continue'
+
+# ====
+# STEP 4: DEPLOY DA NOVA VERSÃO (Site antigo ainda no ar)
+# ====
+- task: PowerShell@2
+  displayName: '🚀 Deploy New Version'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== DEPLOYING NEW VERSION (to new directory) ==="
+      $sourcePath = "$(Pipeline.Workspace)/${{ parameters.repository }}"
+      $destinationPath = "$(DeploymentPath)"
+      Write-Host "Source: $sourcePath"
+      Write-Host "Destination: $destinationPath"
+      Write-Host "Version: $(FullVersionWithSuffix)"
+      try {
+          # O diretório de destino já foi criado pelo script do IIS, então não precisa criar aqui.
+          # A estratégia de "novo diretório por versão" garante que ele esteja limpo.
+          Write-Host "Copying application files..."
+          Copy-Item -Path "$sourcePath\*" -Destination $destinationPath -Recurse -Force
+          $copiedFiles = (Get-ChildItem -Path $destinationPath -Recurse -File).Count
+          Write-Host "✅ Deployment completed: $copiedFiles files copied"
+
+          # Verifica se os arquivos no novo diretório estão compactados. Se estiverem, descompacta.
+          $zipFiles = Get-ChildItem -Path $destinationPath -Filter "*.zip" -Recurse
+          foreach ($zip in $zipFiles) {
+              Write-Host "Found zip file: $($zip.FullName). Extracting..."
+              Expand-Archive -Path $zip.FullName -DestinationPath $destinationPath -Force
+              Remove-Item -Path $zip.FullName -Force
+              Write-Host "✅ Extracted and removed zip: $($zip.Name)"
+          }
+
+          Write-Host "Verifying critical files..."
+          $criticalFiles = @("web.config", "appsettings.json", "${{ parameters.mainCsproj }}.dll")
+          foreach ($file in $criticalFiles) {
+              $filePath = Join-Path $destinationPath $file
+              if (Test-Path $filePath) {
+                  $size = (Get-Item $filePath).Length
+                  Write-Host "✅ $file ($size bytes)"
+              } else {
+                  throw "Critical file missing after deployment: $file"
+              }
+          }
+      }
+      catch {
+          Write-Error "Deployment failed: $($_.Exception.Message)"
+          throw
+      }
+    errorActionPreference: 'stop'
+
+# ====
+# NOVA ORDEM - STEP 5: CONFIGURAÇÃO POR AMBIENTE (No novo diretório)
+# ====
+- task: PowerShell@2
+  displayName: '⚙️ Apply Environment Configuration'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== APPLYING ENVIRONMENT CONFIGURATION ==="
+      $deploymentPath = "$(DeploymentPath)"
+      $environment = "${{ parameters.environment }}"
+      Write-Host "Environment: $environment"
+      Write-Host "Deployment Path: $deploymentPath"
+      try {
+          $appSettingsEnv = Join-Path $deploymentPath "appsettings.$environment.json"
+          $appSettingsMain = Join-Path $deploymentPath "appsettings.json"
+          if (Test-Path $appSettingsEnv) {
+              Write-Host "Applying environment-specific configuration..."
+              Copy-Item -Path $appSettingsEnv -Destination $appSettingsMain -Force
+              Write-Host "✅ Applied: appsettings.$environment.json"
+          } else {
+              Write-Warning "Environment-specific config not found: $appSettingsEnv"
+          }
+          Write-Host "Configuring directory permissions..."
+          icacls $deploymentPath /grant "IIS_IUSRS:(OI)(CI)RX" /T | Out-Null
+          icacls $deploymentPath /grant "IUSR:(OI)(CI)RX" /T | Out-Null
+          Write-Host "✅ Directory permissions configured"
+          $logsPath = Join-Path $deploymentPath "logs"
+          if (!(Test-Path $logsPath)) {
+              New-Item -Path $logsPath -ItemType Directory -Force | Out-Null
+              icacls $logsPath /grant "IIS_IUSRS:(OI)(CI)F" /T | Out-Null
+              Write-Host "✅ Logs directory created with write permissions"
+          }
+          Write-Host "✅ Environment configuration applied successfully"
+      }
+      catch {
+          Write-Error "Environment configuration failed: $($_.Exception.Message)"
+          throw
+      }
+    errorActionPreference: 'stop'
+
+# ====
+# NOVA ORDEM - STEP 6: PARAR APLICAÇÃO (Início do downtime)
+# ====
+- task: PowerShell@2
+  displayName: '⏹️ Stop Application Gracefully'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== STOPPING APPLICATION ==="
+      # CORREÇÃO: Importar ambos os módulos para garantir compatibilidade
+      Import-Module WebAdministration
+      Import-Module IISAdministration
+      try {
+          $website = Get-Website -Name "${{ parameters.websiteName }}" -ErrorAction SilentlyContinue
+          if ($website -and $website.State -eq "Started") {
+              Write-Host "Stopping website: ${{ parameters.websiteName }}"
+              Stop-Website -Name "${{ parameters.websiteName }}"
+              Write-Host "✅ Website stopped"
+          } else {
+              Write-Host "Website ${{ parameters.websiteName }} is not running or does not exist"
+          }
+          Write-Host "Waiting for active connections to finish..."
+          Start-Sleep -Seconds 5
+          $appPool = Get-IISAppPool -Name "${{ parameters.appPoolName }}" -ErrorAction SilentlyContinue
+          if ($appPool -and $appPool.State -eq "Started") {
+              Write-Host "Stopping application pool: ${{ parameters.appPoolName }}"
+              Stop-WebAppPool -Name "${{ parameters.appPoolName }}"
+              $timeout = 30
+              $elapsed = 0
+              # CORREÇÃO: Usar Get-IISAppPool consistentemente
+              while ((Get-IISAppPool -Name "${{ parameters.appPoolName }}").State -ne "Stopped" -and $elapsed -lt $timeout) {
+                  Start-Sleep -Seconds 1
+                  $elapsed++
+                  if ($elapsed % 5 -eq 0) { Write-Host "Waiting for app pool to stop... ($elapsed/$timeout seconds)" }
+              }
+              if ($elapsed -ge $timeout) {
+                  Write-Warning "Application pool did not stop within $timeout seconds. Forcing stop..."
+                  Get-WmiObject Win32_Process | Where-Object { $_.CommandLine -like "*${{ parameters.appPoolName }}*" } | ForEach-Object { 
+                      Write-Host "Killing process: $($_.ProcessId)"; Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+                  }
+              } else {
+                  Write-Host "✅ Application pool stopped successfully"
+              }
+          } else {
+              Write-Host "Application pool ${{ parameters.appPoolName }} is not running or does not exist"
+          }
+          Write-Host "Waiting for file handles to be released..."
+          Start-Sleep -Seconds 3
+          Write-Host "✅ Application stopped gracefully"
+      }
+      catch {
+          Write-Error "Error stopping application: $($_.Exception.Message)"
+          throw
+      }
+    errorActionPreference: 'stop'
+
+# ====
+# NOVA ORDEM - STEP 7: INICIAR APLICAÇÃO (Troca de ponteiro e fim do downtime)
+# ====
+- task: PowerShell@2
+  displayName: '▶️ Start Application'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== STARTING APPLICATION ==="
+      Import-Module WebAdministration
+      Import-Module IISAdministration
+      try {
+          Write-Host "Updating website physical path..."
+          Set-ItemProperty -Path "IIS:\Sites\${{ parameters.websiteName }}" -name "physicalPath" -value "$(DeploymentPath)"
+          Write-Host "✅ Website path updated to: $(DeploymentPath)"
+
+          Write-Host "Starting application pool: ${{ parameters.appPoolName }}"
+          Start-WebAppPool -Name "${{ parameters.appPoolName }}"
+          
+          Write-Host "Starting website: ${{ parameters.websiteName }}"
+          Start-Website -Name "${{ parameters.websiteName }}"
+          
+          Write-Host "Waiting for application to initialize..."
+          Start-Sleep -Seconds 10
+          
+          $finalAppPool = Get-IISAppPool -Name "${{ parameters.appPoolName }}"
+          $finalWebsite = Get-Website -Name "${{ parameters.websiteName }}"
+          Write-Host "Final status: App Pool ($($finalAppPool.State)), Website ($($finalWebsite.State))"
+          if ($finalAppPool.State -eq "Started" -and $finalWebsite.State -eq "Started") {
+              Write-Host "🎉 Application started successfully!"
+          } else {
+              throw "Application failed to start properly"
+          }
+      }
+      catch {
+          Write-Error "Failed to start application: $($_.Exception.Message)"
+          throw
+      }
+    errorActionPreference: 'stop'
+
+# ====
+# STEP 8: HEALTH CHECKS (Sem alterações de ordem)
+# ====
+- task: PowerShell@2
+  displayName: '🏥 Health Check and Validation'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== HEALTH CHECK AND VALIDATION ==="
+      $domainName = "${{ parameters.domainName }}"
+      $retries = ${{ parameters.healthCheckRetries }}
+      $delay = ${{ parameters.healthCheckDelay }}
+      Write-Host "Target: https://$domainName/health"
+      $healthPassed = $false
+      for ($i = 1; $i -le $retries; $i++) {
+          Write-Host ""; Write-Host "=== HEALTH CHECK ATTEMPT $i/$retries ==="
+          try {
+              $response = Invoke-WebRequest -Uri "https://$domainName/health" -TimeoutSec 30 -UseBasicParsing -ErrorAction Stop
+              if ($response.StatusCode -eq 200) {
+                  Write-Host "✅ Health check passed (HTTP 200)"
+                  $healthPassed = $true
+                  break
+              } else {
+                  Write-Host "⚠️ Unexpected status code: $($response.StatusCode)"
+              }
+          }
+          catch {
+              Write-Host "❌ Health check failed: $($_.Exception.Message)"
+          }
+          if ($i -lt $retries) { Write-Host "Waiting $delay seconds before next attempt..."; Start-Sleep -Seconds $delay }
+      }
+      Write-Host ""; Write-Host "=== HEALTH CHECK RESULT ==="
+      if ($healthPassed) {
+          Write-Host "🎉 Health check PASSED after $i attempt(s)"
+      } else {
+          Write-Host "##vso[task.setvariable variable=HealthCheckFailed]true"
+          throw "Health check FAILED after $retries attempts - deployment unsuccessful"
+      }
+    enabled: false
+    errorActionPreference: 'stop'
+
+# ====
+# STEP 9: DEPLOYMENT SUMMARY (Sem alterações de ordem)
+# ====
+- task: PowerShell@2
+  displayName: '📊 Deployment Summary'
+  condition: always()
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== DEPLOYMENT SUMMARY ==="
+      $deploymentStatus = "$(Agent.JobStatus)"
+      Write-Host "VM: ${{ parameters.vmName }}"
+      Write-Host "Environment: ${{ parameters.environment }}"
+      Write-Host "Version: ${{ parameters.fullVersion }}"
+      Write-Host "Deployment Status: $deploymentStatus"
+      if ($deploymentStatus -eq "Succeeded") {
+          Write-Host "🎉 DEPLOYMENT SUCCESSFUL on ${{ parameters.vmName }}!"
+          Write-Host "Access URL: https://${{ parameters.domainName }}"
+      } else {
+          Write-Host "💥 DEPLOYMENT FAILED on ${{ parameters.vmName }}"
+          if ("$(BackupPath)" -ne "") { Write-Host "Backup available at: $(BackupPath)" }
+      }
+    errorActionPreference: 'continue'

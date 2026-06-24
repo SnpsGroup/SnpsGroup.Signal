@@ -1,0 +1,264 @@
+# azure-pipelines-hybrid.yml
+# Pipeline híbrido: YAML Multi-stage + Deployment Groups
+#
+# DECISÕES ARQUITETURAIS:
+# 1. Build usa Microsoft-hosted (segurança + sem setup)
+# 2. Deploy usa Deployment Groups (paralelismo automático)
+# 3. Templates YAML (reutilização + versionamento)
+# 4. Environments (approval gates + auditoria)
+
+name: 'SnpsGroup.Signal_$(Date:yyyyMMdd).$(Rev:r)'
+
+trigger:
+  branches:
+    include:
+    - main        # Deploy automático para produção apenas do main
+    - vnext       # Deploy automático para staging do vnext
+  paths:
+    exclude:
+    - README.md
+    - docs/*
+    - "*.md"
+
+pr:
+  branches:
+    include:
+    - main
+    - vnext
+  paths:
+    exclude:
+    - README.md
+    - docs/*
+
+variables:
+# Variáveis default (SnpsGroup.Global pode sobrescrever)
+- name: buildConfiguration
+  value: 'Release'
+- name: dotnetVersion
+  value: '10.0.x'
+- name: projectName
+  value: 'SnpsGroup.Signal'
+- name: repository
+  value: 'SnpsGroup.Signal'
+- name: mainCsproj
+  value: 'SnpsGroup.SseGateway'
+- name: environment
+  value: 'Production'
+- name: websiteName
+  value: 'AdaptiveSignal'
+- name: appPoolName
+  value: 'AdaptiveSignal'
+- name: domainName
+  value: 'signal.snpsgroup.com'
+- name: cloudProvider
+  value: 'winov'
+- name: versionApiUrl
+  value: 'https://b1-desktop.snpsgroup.com:9986/deploy/api'
+
+stages:
+
+# ====================================
+# STAGE 1: OBTER VERSÃO VIA API
+# ====================================
+- stage: GetVersion
+  displayName: '🔢 Get Version from External API'
+  pool:
+    vmImage: 'windows-2022'
+  jobs:
+  - job: GetVersionFromAPI
+    displayName: 'Query SnpsGroup Version API'
+    steps:
+    - task: PowerShell@2
+      displayName: '🌐 Call External Versioning API'
+      inputs:
+        filePath: '$(Build.SourcesDirectory)/scripts/Get-SnpsGroupVersion.ps1'
+        arguments: >
+          -CloudProvider $(cloudProvider)
+          -Repository $(repository)
+          -ApiBaseUrl $(versionApiUrl)
+        errorActionPreference: 'stop'
+        failOnStderr: true
+        workingDirectory: '$(Build.SourcesDirectory)'
+      env:
+        SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+        AZDO_ORGURL: $(System.TeamFoundationCollectionUri)
+        AZDO_PROJECT: $(System.TeamProject)
+        VG_NAME: 'SnpsGroup.Global'
+        FALLBACK_VAR_NAME: 'fallbackVersion'
+      name: 'VersionOutput'
+
+    - task: PowerShell@2
+      displayName: '✅ Validate Version Format'
+      inputs:
+        targetType: 'inline'
+        script: |
+          $version = "$(VersionOutput.FullVersion)"
+          Write-Host "Validando versão: $version"
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Versão não está no formato esperado (x.y.z): $version"
+          }
+          $versionParts = $version.Split('.')
+          $majorVersion = [int]$versionParts[0]
+          if ($majorVersion -lt 1) {
+            Write-Warning "Versão major é 0 - pode ser versão de desenvolvimento"
+          }
+          Write-Host "✅ Versão validada: $version"
+          $isMainBranch = "$(Build.SourceBranch)" -eq "refs/heads/master"
+          Write-Host "##vso[task.setvariable variable=IsMainBranch;isOutput=true]$isMainBranch"
+        errorActionPreference: 'stop'
+      name: 'VersionValidation'
+
+# ====================================
+# STAGE 2: BUILD E TESTES + PUBLICAÇÃO NUGET
+# ====================================
+- stage: Build
+  displayName: '🏗️ Build and Test Application'
+  dependsOn: GetVersion
+  pool:
+    vmImage: 'windows-2022'
+  variables:
+  - name: fullVersion
+    value: $[ stageDependencies.GetVersion.GetVersionFromAPI.outputs['VersionOutput.FullVersion'] ]
+  - name: gitTag
+    value: $[ stageDependencies.GetVersion.GetVersionFromAPI.outputs['VersionOutput.GitTag'] ]
+  - name: ciType
+    value: $[ stageDependencies.GetVersion.GetVersionFromAPI.outputs['VersionOutput.CiType'] ]
+  - name: isMainBranch
+    value: $[ stageDependencies.GetVersion.VersionValidation.outputs['VersionValidation.IsMainBranch'] ]
+
+  jobs:
+  - job: BuildApp
+    displayName: 'Build .NET 10 Application'
+    steps:
+    - template: templates/build-steps.yml
+      parameters:
+        projectName: '$(projectName)'
+        repository: '$(repository)'
+        mainCsproj: '$(mainCsproj)'
+        solutionFile: '$(repository).sln'
+        buildConfiguration: '$(buildConfiguration)'
+        dotnetVersion: '$(dotnetVersion)'
+        fullVersion: '$(fullVersion)'
+        runTests: true
+        publishArtifacts: true
+        publishNuget: true
+        createGitTag: ${{ eq(variables.isMainBranch, 'True') }}
+        gitTag: '$(gitTag)'
+
+# ====================================
+# STAGE 3: DEPLOY PARA STAGING
+# ====================================
+- stage: DeployStaging
+  displayName: '🚀 Deploy to Staging Environment'
+  dependsOn:
+  - Build
+  - GetVersion
+  condition: succeeded()
+  variables:
+  - name: fullVersion
+    value: $[ stageDependencies.GetVersion.GetVersionFromAPI.outputs['VersionOutput.FullVersion'] ]
+
+  jobs:
+  - deployment: DeployToStaging
+    displayName: 'Deploy to Staging Servers'
+    environment:
+      name: 'SnpsGroup-Staging'
+      resourceType: virtualMachine
+      tags: web,iis,winov-services
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - template: templates/hybrid-deploy-steps.yml
+            parameters:
+              environment: 'Staging'
+              fullVersion: '$(fullVersion)'
+              websiteName: 'Stage$(websiteName)'
+              appPoolName: 'Stage$(appPoolName)'
+              domainName: 'stage-$(repository.ToLower()).snpsgroup.com'
+              deploymentType: 'staging'
+              repository: '$(repository)'
+              mainCsproj: '$(mainCsproj)'
+
+# ====================================
+# STAGE 4: DEPLOY PARA PRODUÇÃO
+# ====================================
+- stage: DeployProduction
+  displayName: '🎯 Deploy to Production Environment'
+  dependsOn:
+  - DeployStaging
+  - GetVersion
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/master'))
+  variables:
+  - name: isMainBranch
+    value: $[ stageDependencies.GetVersion.VersionValidation.outputs['VersionValidation.IsMainBranch'] ]
+  - name: fullVersion
+    value: $[ stageDependencies.GetVersion.GetVersionFromAPI.outputs['VersionOutput.FullVersion'] ]
+
+  jobs:
+  - deployment: DeployToProductionGroup
+    displayName: 'Deploy to Production Servers using Deployment Group'
+    environment:
+      name: 'SnpsGroup-Production'
+      resourceType: virtualMachine
+      tags: web,iis,winov-services
+    strategy:
+      rolling:
+        maxParallel: 1
+        preDeploy:
+          steps:
+          - template: templates/pre-deploy-steps.yml
+            parameters:
+              environment: 'Production'
+              vmName: '$(Agent.MachineName)'
+        deploy:
+          steps:
+          - template: templates/hybrid-deploy-steps.yml
+            parameters:
+              environment: '$(environment)'
+              fullVersion: '$(fullVersion)'
+              websiteName: '$(websiteName)'
+              appPoolName: '$(appPoolName)'
+              domainName: '$(domainName)'
+              deploymentType: 'production'
+              vmName: '$(Agent.MachineName)'
+              repository: '$(repository)'
+              mainCsproj: '$(mainCsproj)'
+        postRouteTraffic:
+          steps:
+          - template: templates/post-deploy-steps.yml
+            parameters:
+              environment: 'Production'
+              domainName: '$(domainName)'
+              vmName: '$(Agent.MachineName)'
+
+# ====================================
+# STAGE 5: NOTIFICAÇÕES E CLEANUP
+# ====================================
+- stage: Notifications
+  displayName: '📢 Send Notifications and Cleanup'
+  dependsOn:
+  - DeployProduction
+  condition: always()
+  pool:
+    vmImage: 'windows-2022'
+  jobs:
+  - job: SendNotifications
+    displayName: 'Send Deployment Notifications'
+    steps:
+    - task: PowerShell@2
+      displayName: '📧 Deployment Summary'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "=== DEPLOYMENT SUMMARY ==="
+          Write-Host "Status: $(Agent.JobStatus)"
+          Write-Host "Version: $(Build.BuildNumber)"
+          Write-Host "Branch: $(Build.SourceBranchName)"
+          Write-Host "Build: $(Build.BuildId)"
+
+          if ("$(Agent.JobStatus)" -eq "Succeeded") {
+            Write-Host "🎉 Deployment completed successfully!"
+          } else {
+            Write-Host "💥 Deployment failed - check logs for details"
+          }

@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);NU1608;NU1510;NU1901;NU1902;NU1903;CA1848;CA1852;NETSDK1206;CS1998;CS9113;CS0108;CS8321;CS0414;CS0618;CS8633;xUnit1031;ASPDEPR002</NoWarn>
+  </PropertyGroup>
+</Project>

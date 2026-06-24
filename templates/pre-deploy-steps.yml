@@ -1,0 +1,259 @@
+# templates/pre-deploy-steps.yml
+# Template para preparação antes do deployment em cada VM individual
+#
+# PROPÓSITO:
+# Este template executa ANTES do deployment em cada VM do deployment group
+# É especialmente útil para rolling deployments onde precisamos preparar
+# cada máquina individualmente antes de fazer o deployment
+
+parameters:
+- name: environment
+  type: string              # Production, Staging
+- name: vmName  
+  type: string              # Nome da VM atual ($(Agent.MachineName))
+- name: websiteName
+  type: string
+  default: ''               # Nome do website (opcional)
+- name: appPoolName
+  type: string  
+  default: ''               # Nome do app pool (opcional)
+
+steps:
+
+# ====================================
+# PRE-DEPLOY: LOGGING E IDENTIFICAÇÃO
+# ====================================
+
+- task: PowerShell@2
+  displayName: '📋 Pre-Deploy VM Information'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== PRE-DEPLOYMENT PREPARATION ==="
+      Write-Host "VM: ${{ parameters.vmName }}"
+      Write-Host "Environment: ${{ parameters.environment }}"
+      Write-Host "Timestamp: $(Get-Date)"
+      Write-Host "Agent: $(Agent.Name)"
+      Write-Host "Pipeline: $(Build.DefinitionName)"
+      Write-Host "Build: $(Build.BuildNumber)"
+      Write-Host ""
+      
+      # Informações do sistema para troubleshooting
+      Write-Host "=== SYSTEM STATUS ==="
+      Write-Host "Computer: $env:COMPUTERNAME"
+      Write-Host "User Context: $env:USERNAME"
+      Write-Host "PowerShell Version: $($PSVersionTable.PSVersion)"
+      
+      # Status de recursos do sistema
+      $cpu = Get-WmiObject Win32_Processor | Measure-Object -Property LoadPercentage -Average
+      $memory = Get-WmiObject Win32_OperatingSystem
+      $memoryUsed = [math]::Round((($memory.TotalVisibleMemorySize - $memory.FreePhysicalMemory) / $memory.TotalVisibleMemorySize) * 100, 2)
+      $diskFree = [math]::Round((Get-WmiObject Win32_LogicalDisk -Filter "DeviceID='C:'").FreeSpace / 1GB, 2)
+      
+      Write-Host "CPU Usage: $($cpu.Average)%"
+      Write-Host "Memory Usage: $memoryUsed%"
+      Write-Host "Free Disk Space: ${diskFree}GB"
+      
+      # Verificar se há outros deployments em andamento
+      $otherAgents = Get-Process | Where-Object { $_.ProcessName -like "*Agent*" -and $_.Id -ne $PID }
+      if ($otherAgents) {
+          Write-Host "⚠️ Other agent processes detected:"
+          $otherAgents | ForEach-Object { Write-Host "  PID $($_.Id): $($_.ProcessName)" }
+      }
+      
+      Write-Host ""
+
+# ====================================
+# PRE-DEPLOY: VALIDAÇÃO DE AMBIENTE
+# ====================================
+
+- task: PowerShell@2
+  displayName: '🔍 Environment Validation'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== ENVIRONMENT VALIDATION ==="
+      
+      # 1. Verificar se IIS está funcionando
+      Write-Host "Checking IIS status..."
+      try {
+          Import-Module WebAdministration -ErrorAction Stop
+          $iisStatus = Get-Service W3SVC -ErrorAction Stop
+          Write-Host "✅ IIS Service Status: $($iisStatus.Status)"
+          
+          if ($iisStatus.Status -ne "Running") {
+              Write-Host "⚠️ IIS is not running - attempting to start..."
+              Start-Service W3SVC
+              Start-Sleep -Seconds 5
+              $iisStatus = Get-Service W3SVC
+              Write-Host "IIS Status after restart: $($iisStatus.Status)"
+          }
+      }
+      catch {
+          throw "IIS validation failed: $($_.Exception.Message)"
+      }
+      
+      # 2. Verificar se website/app pool existem (se especificados)
+      if ("${{ parameters.websiteName }}" -ne "") {
+          Write-Host "Checking existing website: ${{ parameters.websiteName }}"
+          $website = Get-Website -Name "${{ parameters.websiteName }}" -ErrorAction SilentlyContinue
+          if ($website) {
+              Write-Host "✅ Website exists: $($website.Name) (State: $($website.State))"
+              Write-Host "  Physical Path: $($website.PhysicalPath)"
+              Write-Host "  Bindings: $(($website.Bindings.Collection | ForEach-Object { $_.BindingInformation }) -join ', ')"
+          } else {
+              Write-Host "ℹ️ Website ${{ parameters.websiteName }} does not exist yet (will be created)"
+          }
+      }
+      
+      if ("${{ parameters.appPoolName }}" -ne "") {
+          Write-Host "Checking existing app pool: ${{ parameters.appPoolName }}"
+          $appPool = Get-IISAppPool -Name "${{ parameters.appPoolName }}" -ErrorAction SilentlyContinue
+          if ($appPool) {
+              Write-Host "✅ App Pool exists: $($appPool.Name) (State: $($appPool.State))"
+              Write-Host "  Runtime Version: $($appPool.ManagedRuntimeVersion)"
+              Write-Host "  Process Model: $($appPool.ProcessModel.IdentityType)"
+          } else {
+              Write-Host "ℹ️ App Pool ${{ parameters.appPoolName }} does not exist yet (will be created)"
+          }
+      }
+      
+      # 3. Verificar conectividade de rede para load balancer
+      Write-Host "Testing network connectivity..."
+      $networkTests = @(
+          @{ Host = "google.com"; Port = 443; Description = "Internet connectivity" },
+          @{ Host = "b1-desktop.snpsgroup.com"; Port = 9986; Description = "Version API" }
+      )
+      
+      foreach ($test in $networkTests) {
+          try {
+              $result = Test-NetConnection -ComputerName $test.Host -Port $test.Port -InformationLevel Quiet -WarningAction SilentlyContinue
+              if ($result) {
+                  Write-Host "✅ $($test.Description): Connected to $($test.Host):$($test.Port)"
+              } else {
+                  Write-Host "⚠️ $($test.Description): Cannot connect to $($test.Host):$($test.Port)"
+              }
+          }
+          catch {
+              Write-Host "⚠️ $($test.Description): Test failed - $($_.Exception.Message)"
+          }
+      }
+      
+      Write-Host "✅ Environment validation completed"
+
+# ====================================
+# PRE-DEPLOY: PREPARAÇÃO DO SISTEMA
+# ====================================
+
+- task: PowerShell@2
+  displayName: '⚙️ System Preparation'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== SYSTEM PREPARATION ==="
+      
+      # 1. Criar diretórios necessários se não existirem
+      $requiredDirectories = @(
+          "C:\AzureDevops",
+          "C:\AzureDevops\${{ parameters.environment }}",
+          "C:\AzureDevops\Backups",
+          "C:\AzureDevops\Backups\${{ parameters.environment }}",
+          "C:\AzureDevops\Logs",
+          "C:\Temp"
+      )
+      
+      foreach ($dir in $requiredDirectories) {
+          if (!(Test-Path $dir)) {
+              New-Item -Path $dir -ItemType Directory -Force | Out-Null
+              Write-Host "✅ Created directory: $dir"
+          } else {
+              Write-Host "✅ Directory exists: $dir"
+          }
+      }
+      
+      # 2. Verificar e criar logs de deployment
+      $logFile = "C:\AzureDevops\Logs\deployment-${{ parameters.environment }}-$(Get-Date -Format 'yyyyMMdd').log"
+      $logEntry = "[$(Get-Date)] PRE-DEPLOY: Starting deployment preparation on ${{ parameters.vmName }}"
+      Add-Content -Path $logFile -Value $logEntry
+      Write-Host "✅ Deployment logging initialized: $logFile"
+      
+      # 3. Limpar arquivos temporários antigos (mais de 7 dias)
+      Write-Host "Cleaning temporary files..."
+      try {
+          $tempFiles = Get-ChildItem -Path "C:\Temp" -Recurse -File | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-7) }
+          if ($tempFiles) {
+              $tempFiles | Remove-Item -Force -ErrorAction SilentlyContinue
+              Write-Host "✅ Cleaned $($tempFiles.Count) temporary files"
+          } else {
+              Write-Host "✅ No old temporary files to clean"
+          }
+      }
+      catch {
+          Write-Host "⚠️ Temp file cleanup warning: $($_.Exception.Message)"
+      }
+      
+      # 4. Verificar certificados SSL (importante para HTTPS)
+      Write-Host "Checking SSL certificates..."
+      try {
+          $certs = Get-ChildItem -Path Cert:\LocalMachine\My | Where-Object { $_.Subject -like "*snpsgroup.com*" }
+          if ($certs) {
+              Write-Host "✅ SSL certificates found:"
+              $certs | ForEach-Object { 
+                  $daysToExpiry = ($_.NotAfter - (Get-Date)).Days
+                  Write-Host "  Subject: $($_.Subject) (Expires in $daysToExpiry days)"
+                  if ($daysToExpiry -lt 30) {
+                      Write-Host "  ⚠️ Certificate expires soon!"
+                  }
+              }
+          } else {
+              Write-Host "⚠️ No SSL certificates found for snpsgroup.com"
+          }
+      }
+      catch {
+          Write-Host "⚠️ SSL certificate check failed: $($_.Exception.Message)"
+      }
+      
+      Write-Host "✅ System preparation completed"
+
+# ====================================
+# PRE-DEPLOY: NOTIFICAÇÃO DE INÍCIO
+# ====================================
+
+- task: PowerShell@2
+  displayName: '📢 Deployment Start Notification'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== DEPLOYMENT START NOTIFICATION ==="
+      
+      # Log structured information for monitoring systems
+      $deploymentInfo = @{
+          Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC"
+          Event = "DeploymentStarted"
+          VM = "${{ parameters.vmName }}"
+          Environment = "${{ parameters.environment }}"
+          BuildNumber = "$(Build.BuildNumber)"
+          Pipeline = "$(Build.DefinitionName)"
+          Agent = "$(Agent.Name)"
+          Phase = "PreDeploy"
+      }
+      
+      $deploymentJson = $deploymentInfo | ConvertTo-Json -Compress
+      Write-Host "DEPLOYMENT_EVENT: $deploymentJson"
+      
+      # Criar arquivo de status para monitoramento externo
+      $statusFile = "C:\AzureDevops\deployment-status-${{ parameters.environment }}.json"
+      $deploymentInfo | ConvertTo-Json | Out-File -FilePath $statusFile -Encoding UTF8
+      Write-Host "✅ Status file created: $statusFile"
+      
+      # Notificação visual no console
+      Write-Host ""
+      Write-Host "🚀 DEPLOYMENT STARTING ON ${{ parameters.vmName }}"
+      Write-Host "   Environment: ${{ parameters.environment }}"
+      Write-Host "   Time: $(Get-Date)"
+      Write-Host "   Build: $(Build.BuildNumber)"
+      Write-Host ""
+      Write-Host "   This VM will be temporarily taken out of service"
+      Write-Host "   during the deployment process. The load balancer"
+      Write-Host "   will automatically route traffic to other VMs."
+      Write-Host ""

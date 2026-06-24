@@ -1,0 +1,434 @@
+# templates/post-deploy-steps.yml  
+# Template para validação e finalização após deployment em cada VM
+#
+# PROPÓSITO:
+# Este template executa APÓS o deployment em cada VM do deployment group
+# Faz validações finais, testes de integração e notificações de conclusão
+
+parameters:
+- name: environment
+  type: string              # Production, Staging
+- name: domainName
+  type: string              # def.snpsgroup.com, stage-dfe.snpsgroup.com
+- name: vmName
+  type: string              # Nome da VM atual
+- name: fullVersion
+  type: string              # Versão deployada
+  default: ''
+- name: websiteName
+  type: string
+  default: ''
+- name: appPoolName  
+  type: string
+  default: ''
+
+steps:
+
+# ====================================
+# POST-DEPLOY: VALIDAÇÃO AVANÇADA
+# ====================================
+
+- task: PowerShell@2
+  displayName: '🔍 Advanced Application Validation'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== ADVANCED APPLICATION VALIDATION ==="
+      Write-Host "VM: ${{ parameters.vmName }}"
+      Write-Host "Domain: ${{ parameters.domainName }}"
+      Write-Host "Version: ${{ parameters.fullVersion }}"
+      Write-Host ""
+      
+      $validationResults = @{}
+      
+      # 1. Validação de processo e memória
+      Write-Host "1. Process and Memory Validation"
+      try {
+          Import-Module WebAdministration
+          
+          if ("${{ parameters.appPoolName }}" -ne "") {
+              $appPool = Get-IISAppPool -Name "${{ parameters.appPoolName }}"
+              Write-Host "   App Pool State: $($appPool.State)"
+              
+              if ($appPool.State -eq "Started") {
+                  # Encontrar processo do worker
+                  $workerProcesses = Get-Process | Where-Object { $_.ProcessName -eq "w3wp" }
+                  if ($workerProcesses) {
+                      $totalMemoryMB = ($workerProcesses | Measure-Object WorkingSet -Sum).Sum / 1MB
+                      Write-Host "   ✅ Worker processes: $($workerProcesses.Count)"
+                      Write-Host "   ✅ Total memory usage: $([math]::Round($totalMemoryMB, 2)) MB"
+                      
+                      # Alert se uso de memória muito alto
+                      if ($totalMemoryMB -gt 1024) {
+                          Write-Host "   ⚠️ High memory usage detected"
+                      }
+                      
+                      $validationResults.ProcessValidation = "Success"
+                  } else {
+                      Write-Host "   ⚠️ No worker processes found"
+                      $validationResults.ProcessValidation = "Warning"
+                  }
+              } else {
+                  Write-Host "   ❌ App Pool not running"
+                  $validationResults.ProcessValidation = "Failed"
+              }
+          }
+      }
+      catch {
+          Write-Host "   ❌ Process validation failed: $($_.Exception.Message)"
+          $validationResults.ProcessValidation = "Failed"
+      }
+      
+      # 2. Validação de conectividade HTTP
+      Write-Host ""
+      Write-Host "2. HTTP Connectivity Validation"
+      try {
+          $baseUrl = "https://${{ parameters.domainName }}"
+          
+          # Teste de endpoints críticos
+          $endpoints = @(
+              @{ Path = "/health"; Required = $true; Description = "Health check" },
+              @{ Path = "/version"; Required = $false; Description = "Version info" },
+              @{ Path = "/api/status"; Required = $false; Description = "API status" },
+              @{ Path = "/"; Required = $true; Description = "Home page" }
+          )
+          
+          $successfulEndpoints = 0
+          $requiredEndpoints = ($endpoints | Where-Object { $_.Required }).Count
+          
+          foreach ($endpoint in $endpoints) {
+              try {
+                  $url = "$baseUrl$($endpoint.Path)"
+                  $response = Invoke-WebRequest -Uri $url -TimeoutSec 15 -UseBasicParsing -ErrorAction Stop
+                  
+                  if ($response.StatusCode -eq 200) {
+                      Write-Host "   ✅ $($endpoint.Description): $($response.StatusCode)"
+                      if ($endpoint.Required) { $successfulEndpoints++ }
+                  } else {
+                      Write-Host "   ⚠️ $($endpoint.Description): $($response.StatusCode)"
+                  }
+                  
+                  # Log response time para performance monitoring
+                  Write-Host "      Response time: N/A (PowerShell doesn't report this easily)"
+              }
+              catch {
+                  if ($endpoint.Required) {
+                      Write-Host "   ❌ $($endpoint.Description): FAILED - $($_.Exception.Message)"
+                  } else {
+                      Write-Host "   ⚠️ $($endpoint.Description): Not available (optional)"
+                  }
+              }
+          }
+          
+          if ($successfulEndpoints -eq $requiredEndpoints) {
+              Write-Host "   ✅ All required endpoints accessible ($successfulEndpoints/$requiredEndpoints)"
+              $validationResults.ConnectivityValidation = "Success"
+          } else {
+              Write-Host "   ❌ Some required endpoints failed ($successfulEndpoints/$requiredEndpoints)"
+              $validationResults.ConnectivityValidation = "Failed"
+          }
+      }
+      catch {
+          Write-Host "   ❌ Connectivity validation failed: $($_.Exception.Message)"
+          $validationResults.ConnectivityValidation = "Failed"
+      }
+      
+      # 3. Validação de logs de aplicação
+      Write-Host ""
+      Write-Host "3. Application Logs Validation"
+      try {
+          # Verificar logs de aplicação recentes (últimos 5 minutos)
+          $cutoffTime = (Get-Date).AddMinutes(-5)
+          
+          # Event Viewer - Application logs
+          $recentAppErrors = Get-EventLog -LogName Application -After $cutoffTime -EntryType Error -ErrorAction SilentlyContinue | 
+                           Where-Object { $_.Source -like "*IIS*" -or $_.Source -like "*ASP.NET*" }
+          
+          if ($recentAppErrors) {
+              Write-Host "   ⚠️ Recent application errors found:"
+              $recentAppErrors | Select-Object -First 3 | ForEach-Object {
+                  Write-Host "      $($_.TimeGenerated): $($_.Message.Substring(0, [Math]::Min(100, $_.Message.Length)))"
+              }
+              $validationResults.LogsValidation = "Warning"
+          } else {
+              Write-Host "   ✅ No recent application errors"
+              $validationResults.LogsValidation = "Success"
+          }
+          
+          # Verificar logs customizados da aplicação se existirem
+          $appLogPath = "C:\AzureDevops\${{ parameters.environment }}\SnpsGroup.Dfe\logs"
+          if (Test-Path $appLogPath) {
+              $recentLogFiles = Get-ChildItem -Path $appLogPath -Filter "*.log" | 
+                              Where-Object { $_.LastWriteTime -gt $cutoffTime }
+              
+              if ($recentLogFiles) {
+                  Write-Host "   ✅ Application is writing logs: $($recentLogFiles.Count) recent files"
+              } else {
+                  Write-Host "   ⚠️ No recent application log files"
+              }
+          }
+      }
+      catch {
+          Write-Host "   ⚠️ Log validation warning: $($_.Exception.Message)"
+          $validationResults.LogsValidation = "Warning"
+      }
+      
+      # 4. Validação de performance básica
+      Write-Host ""
+      Write-Host "4. Basic Performance Validation"
+      try {
+          $performanceCounters = @(
+              @{ Counter = "\Processor(_Total)\% Processor Time"; Threshold = 80; Description = "CPU Usage" },
+              @{ Counter = "\Memory\Available MBytes"; Threshold = 500; Description = "Available Memory"; Inverse = $true }
+          )
+          
+          foreach ($counter in $performanceCounters) {
+              try {
+                  $value = (Get-Counter -Counter $counter.Counter -SampleInterval 1 -MaxSamples 1).CounterSamples.CookedValue
+                  
+                  $status = if ($counter.Inverse) { 
+                      if ($value -gt $counter.Threshold) { "✅" } else { "⚠️" }
+                  } else { 
+                      if ($value -lt $counter.Threshold) { "✅" } else { "⚠️" }
+                  }
+                  
+                  $unit = if ($counter.Description -like "*Memory*") { "MB" } else { "%" }
+                  Write-Host "   $status $($counter.Description): $([math]::Round($value, 2))$unit"
+              }
+              catch {
+                  Write-Host "   ⚠️ $($counter.Description): Unable to measure"
+              }
+          }
+          
+          $validationResults.PerformanceValidation = "Success"
+      }
+      catch {
+          Write-Host "   ⚠️ Performance validation warning: $($_.Exception.Message)"
+          $validationResults.PerformanceValidation = "Warning"
+      }
+      
+      # 5. Resumo da validação
+      Write-Host ""
+      Write-Host "=== VALIDATION SUMMARY ==="
+      $overallSuccess = $true
+      
+      foreach ($validation in $validationResults.GetEnumerator()) {
+          $symbol = switch ($validation.Value) {
+              "Success" { "✅"; $true }
+              "Warning" { "⚠️"; $true }
+              "Failed" { "❌"; $overallSuccess = $false; $false }
+          }
+          Write-Host "$symbol $($validation.Key): $($validation.Value)"
+      }
+      
+      if ($overallSuccess) {
+          Write-Host ""
+          Write-Host "🎉 VALIDATION PASSED - Application is healthy on ${{ parameters.vmName }}"
+      } else {
+          Write-Host ""
+          Write-Host "💥 VALIDATION FAILED - Issues detected on ${{ parameters.vmName }}"
+          throw "Post-deployment validation failed"
+      }
+
+# ====================================
+# POST-DEPLOY: INTEGRAÇÃO COM LOAD BALANCER
+# ====================================
+
+- task: PowerShell@2
+  displayName: '⚖️ Load Balancer Integration Check'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== LOAD BALANCER INTEGRATION CHECK ==="
+      
+      # Simular comportamento do load balancer
+      # Na prática, você integraria com seu load balancer real (F5, Azure LB, etc.)
+      
+      Write-Host "Simulating load balancer health check behavior..."
+      
+      $healthCheckUrl = "https://${{ parameters.domainName }}/health"
+      $maxAttempts = 5
+      $successCount = 0
+      
+      for ($i = 1; $i -le $maxAttempts; $i++) {
+          try {
+              Write-Host "Health check attempt $i/$maxAttempts..."
+              $response = Invoke-WebRequest -Uri $healthCheckUrl -TimeoutSec 10 -UseBasicParsing
+              
+              if ($response.StatusCode -eq 200) {
+                  $successCount++
+                  Write-Host "   ✅ Success ($($response.StatusCode))"
+              } else {
+                  Write-Host "   ⚠️ Unexpected status: $($response.StatusCode)"
+              }
+          }
+          catch {
+              Write-Host "   ❌ Failed: $($_.Exception.Message)"
+          }
+          
+          if ($i -lt $maxAttempts) {
+              Start-Sleep -Seconds 3
+          }
+      }
+      
+      $successRate = ($successCount / $maxAttempts) * 100
+      Write-Host ""
+      Write-Host "Health check success rate: $successRate% ($successCount/$maxAttempts)"
+      
+      if ($successRate -ge 80) {
+          Write-Host "✅ VM is ready for load balancer traffic"
+          Write-Host "Load balancer should automatically detect this VM as healthy"
+      } else {
+          Write-Host "❌ VM may not be ready for production traffic"
+          Write-Host "Load balancer might mark this VM as unhealthy"
+          throw "Load balancer readiness check failed"
+      }
+
+# ====================================
+# POST-DEPLOY: CLEANUP E OTIMIZAÇÃO
+# ====================================
+
+- task: PowerShell@2
+  displayName: '🧹 Post-Deploy Cleanup and Optimization'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== POST-DEPLOY CLEANUP AND OPTIMIZATION ==="
+      
+      # 1. Limpar arquivos temporários do deployment
+      Write-Host "1. Cleaning deployment temporary files..."
+      try {
+          $tempPaths = @(
+              "$(Pipeline.Workspace)",
+              "C:\Temp\SnpsGroup*",
+              "C:\AzureDevops\Temp"
+          )
+          
+          foreach ($path in $tempPaths) {
+              if (Test-Path $path) {
+                  $files = Get-ChildItem -Path $path -Recurse -File -ErrorAction SilentlyContinue
+                  if ($files) {
+                      Write-Host "   Cleaning: $path ($($files.Count) files)"
+                      Remove-Item -Path $path -Recurse -Force -ErrorAction SilentlyContinue
+                  }
+              }
+          }
+          Write-Host "   ✅ Temporary files cleaned"
+      }
+      catch {
+          Write-Host "   ⚠️ Cleanup warning: $($_.Exception.Message)"
+      }
+      
+      # 2. Otimizar garbage collection .NET (se aplicável)
+      Write-Host ""
+      Write-Host "2. .NET Optimization..."
+      try {
+          # Forçar garbage collection para liberar memória
+          [System.GC]::Collect()
+          [System.GC]::WaitForPendingFinalizers()
+          [System.GC]::Collect()
+          Write-Host "   ✅ Garbage collection completed"
+      }
+      catch {
+          Write-Host "   ⚠️ GC optimization failed: $($_.Exception.Message)"
+      }
+      
+      # 3. Verificar e otimizar Application Pool settings
+      Write-Host ""
+      Write-Host "3. Application Pool Optimization..."
+      if ("${{ parameters.appPoolName }}" -ne "") {
+          try {
+              Import-Module WebAdministration
+              
+              # Verificar configurações recomendadas para produção
+              $appPool = Get-IISAppPool -Name "${{ parameters.appPoolName }}"
+              
+              $optimizations = @()
+              
+              # Idle timeout - recomendado 0 para produção (sempre ativo)
+              if ($appPool.ProcessModel.IdleTimeout.TotalMinutes -ne 0) {
+                  $optimizations += "Idle timeout not optimized (current: $($appPool.ProcessModel.IdleTimeout.TotalMinutes) min)"
+              }
+              
+              # Recycling - verificar se está configurado apropriadamente
+              if ($appPool.Recycling.PeriodicRestart.Time.TotalHours -lt 24) {
+                  $optimizations += "Periodic restart too frequent (current: $($appPool.Recycling.PeriodicRestart.Time.TotalHours) hours)"
+              }
+              
+              if ($optimizations.Count -gt 0) {
+                  Write-Host "   ⚠️ Optimization opportunities:"
+                  $optimizations | ForEach-Object { Write-Host "      - $_" }
+              } else {
+                  Write-Host "   ✅ Application pool settings are optimized"
+              }
+          }
+          catch {
+              Write-Host "   ⚠️ App pool optimization check failed: $($_.Exception.Message)"
+          }
+      }
+      
+      Write-Host "   ✅ Post-deploy optimization completed"
+
+# ====================================
+# POST-DEPLOY: NOTIFICAÇÃO FINAL
+# ====================================
+
+- task: PowerShell@2
+  displayName: '📢 Deployment Completion Notification'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== DEPLOYMENT COMPLETION NOTIFICATION ==="
+      
+      # Dados estruturados para logging/monitoring
+      $completionInfo = @{
+          Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC"
+          Event = "DeploymentCompleted"
+          VM = "${{ parameters.vmName }}"
+          Environment = "${{ parameters.environment }}"
+          Version = "${{ parameters.fullVersion }}"
+          BuildNumber = "$(Build.BuildNumber)"
+          Pipeline = "$(Build.DefinitionName)"
+          Agent = "$(Agent.Name)"
+          Status = "Success"
+          Url = "https://${{ parameters.domainName }}"
+          Phase = "PostDeploy"
+      }
+      
+      $completionJson = $completionInfo | ConvertTo-Json -Compress
+      Write-Host "DEPLOYMENT_EVENT: $completionJson"
+      
+      # Atualizar arquivo de status
+      $statusFile = "C:\AzureDevops\deployment-status-${{ parameters.environment }}.json"
+      $completionInfo | ConvertTo-Json | Out-File -FilePath $statusFile -Encoding UTF8
+      
+      # Log final no arquivo de deployment
+      $logFile = "C:\AzureDevops\Logs\deployment-${{ parameters.environment }}-$(Get-Date -Format 'yyyyMMdd').log"
+      $logEntry = "[$(Get-Date)] POST-DEPLOY: Deployment completed successfully on ${{ parameters.vmName }} - Version ${{ parameters.fullVersion }}"
+      Add-Content -Path $logFile -Value $logEntry
+      
+      # Notificação visual
+      Write-Host ""
+      Write-Host "🎉 DEPLOYMENT COMPLETED SUCCESSFULLY!"
+      Write-Host "   VM: ${{ parameters.vmName }}"
+      Write-Host "   Environment: ${{ parameters.environment }}"
+      Write-Host "   Version: ${{ parameters.fullVersion }}"
+      Write-Host "   URL: https://${{ parameters.domainName }}"
+      Write-Host "   Completed: $(Get-Date)"
+      Write-Host ""
+      Write-Host "   This VM is now serving the new version and"
+      Write-Host "   is available for load balancer traffic."
+      Write-Host ""
+      Write-Host "   Next steps:"
+      Write-Host "   - Monitor application logs for errors"
+      Write-Host "   - Verify functionality with integration tests"
+      Write-Host "   - Monitor performance metrics"
+      Write-Host ""
+      
+      # Informações adicionais para o próximo deployment
+      Write-Host "=== FOR NEXT DEPLOYMENT ==="
+      Write-Host "Current version deployed: ${{ parameters.fullVersion }}"
+      Write-Host "Deployment path: C:\AzureDevops\${{ parameters.environment }}\SnpsGroup.Dfe"
+      Write-Host "Backup available: C:\AzureDevops\Backups\${{ parameters.environment }}"
+      Write-Host "Status file: $statusFile"
+      Write-Host "Log file: $logFile"

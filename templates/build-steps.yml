@@ -1,0 +1,343 @@
+# templates/build-steps.yml
+# Template reutilizável para build de aplicações .NET do SnpsGroup.Signal.
+# Sem dependências de React / frontend — apenas back-end.
+
+parameters:
+- name: projectName
+  type: string
+  default: 'SnpsGroup.Signal'
+- name: repository
+  type: string
+  default: 'SnpsGroup.Signal'
+- name: solutionFile
+  type: string
+  default: 'SnpsGroup.Signal.sln'
+- name: mainCsproj
+  type: string
+  default: 'SnpsGroup.SseGateway'
+- name: buildConfiguration
+  type: string
+  default: 'Release'
+- name: dotnetVersion
+  type: string
+  default: '10.0.x'
+- name: fullVersion
+  type: string
+  default: '1.0.0'
+- name: runTests
+  type: boolean
+  default: true
+- name: publishArtifacts
+  type: boolean
+  default: true
+- name: createGitTag
+  type: boolean
+  default: true
+- name: gitTag
+  type: string
+  default: ''
+- name: publishNuget
+  type: boolean
+  default: true
+
+steps:
+- task: UseDotNet@2
+  displayName: 'Install .NET ${{ parameters.dotnetVersion }} SDK'
+  inputs:
+    packageType: 'sdk'
+    version: '${{ parameters.dotnetVersion }}'
+    installationPath: '$(Agent.ToolsDirectory)/dotnet'
+    performMultiLevelLookup: true
+    includePreviewVersions: false
+
+- task: PowerShell@2
+  displayName: 'Display Build Information'
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== BUILD INFORMATION ==="
+      Write-Host "Project: ${{ parameters.projectName }}"
+      Write-Host "Repository: ${{ parameters.repository }}"
+      Write-Host "Configuration: ${{ parameters.buildConfiguration }}"
+      Write-Host "Version: ${{ parameters.fullVersion }}"
+      Write-Host "Agent: $env:AGENT_NAME"
+      Write-Host "Build Number: $(Build.BuildNumber)"
+      Write-Host "Source Branch: $(Build.SourceBranch)"
+      Write-Host ""
+
+      Write-Host "=== .NET SDK INFO ==="
+      dotnet --info
+      Write-Host ""
+
+      Write-Host "=== PROJECT STRUCTURE ==="
+      Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Include "*.csproj", "*.sln" |
+        ForEach-Object { Write-Host $_.FullName }
+
+- task: DotNetCoreCLI@2
+  displayName: 'Restore NuGet Packages'
+  inputs:
+    command: 'restore'
+    projects: '**/*.csproj'
+    feedsToUse: 'config'
+    nugetConfigPath: 'NuGet.config'
+    verbosityRestore: 'Normal'
+
+- task: PowerShell@2
+  displayName: 'Validate Project File'
+  inputs:
+    targetType: 'inline'
+    script: |
+      $projectFile = Get-ChildItem -Path "$(Build.SourcesDirectory)" -Recurse -Filter "${{ parameters.mainCsproj }}.csproj" | Select-Object -First 1
+
+      if (!$projectFile) {
+        throw "Arquivo de projeto ${{ parameters.mainCsproj }}.csproj não encontrado!"
+      }
+
+      Write-Host "✅ Projeto encontrado: $($projectFile.FullName)"
+
+      $projectContent = Get-Content $projectFile.FullName -Raw
+      Write-Host "=== PROJECT FILE CONTENT ==="
+      Write-Host $projectContent
+
+      if ($projectContent -match "Microsoft.AspNetCore" -or $projectContent -match "Sdk=\"Microsoft.NET.Sdk.Web\"") {
+        Write-Host "✅ Projeto ASP.NET Core detectado"
+        Write-Host "##vso[task.setvariable variable=IsWebProject]true"
+      } else {
+        Write-Host "ℹ️ Projeto não-web detectado"
+        Write-Host "##vso[task.setvariable variable=IsWebProject]false"
+      }
+
+- task: DotNetCoreCLI@2
+  displayName: 'Build Solution'
+  inputs:
+    command: custom
+    custom: 'build'
+    projects: '**/${{ parameters.solutionFile }}'
+    arguments: >-
+      --configuration ${{ parameters.buildConfiguration }}
+      --no-restore
+      -p:AssemblyVersion=${{ parameters.fullVersion }}.0
+      -p:FileVersion=${{ parameters.fullVersion }}.0
+      -p:InformationalVersion=${{ parameters.fullVersion }}
+      -p:Version=${{ parameters.fullVersion }}
+      -p:TreatWarningsAsErrors=false
+      -p:ContinuousIntegrationBuild=true
+      -p:Platform="x64"
+
+- task: DotNetCoreCLI@2
+  displayName: 'Run Unit Tests'
+  condition: and(succeeded(), eq('${{ parameters.runTests }}', 'true'))
+  inputs:
+    command: 'test'
+    projects: '**/*Tests/*.csproj'
+    arguments: >-
+      --configuration ${{ parameters.buildConfiguration }}
+      --no-build
+      --collect:"XPlat Code Coverage"
+      --logger trx
+      --results-directory $(Agent.TempDirectory)/TestResults
+    publishTestResults: true
+    continueOnError: false
+
+- task: PublishTestResults@2
+  displayName: 'Publish Test Results'
+  condition: and(always(), eq('${{ parameters.runTests }}', 'true'))
+  inputs:
+    testResultsFormat: 'VSTest'
+    testResultsFiles: '$(Agent.TempDirectory)/TestResults/**/*.trx'
+    failTaskOnFailedTests: true
+    publishRunAttachments: true
+
+- task: PublishCodeCoverageResults@2
+  displayName: 'Publish Code Coverage'
+  condition: and(succeeded(), eq('${{ parameters.runTests }}', 'true'))
+  inputs:
+    codeCoverageTool: 'Cobertura'
+    summaryFileLocation: '$(Agent.TempDirectory)/TestResults/**/coverage.cobertura.xml'
+    reportDirectory: '$(Agent.TempDirectory)/TestResults/coveragereport'
+    failIfCoverageEmpty: false
+
+# ─── Publica o pacote NuGet do Client (feed privado) ────────────────────────
+- task: DotNetCoreCLI@2
+  displayName: 'Pack SnpsGroup.SseGateway.Client (NuGet)'
+  condition: and(succeeded(), eq('${{ parameters.publishNuget }}', 'true'))
+  inputs:
+    command: 'pack'
+    packagesToPack: '**/SnpsGroup.SseGateway.Client.csproj'
+    versioningScheme: 'byEnvVar'
+    versionEnvVar: 'FULL_VERSION'
+    packDirectory: '$(Build.ArtifactStagingDirectory)/nuget'
+    arguments: >-
+      --configuration ${{ parameters.buildConfiguration }}
+      --no-build
+      -p:PackageVersion=$(FULL_VERSION)
+      -p:Version=$(FULL_VERSION)
+      -p:ContinuousIntegrationBuild=true
+      -p:Platform="x64"
+
+- task: DotNetCoreCLI@2
+  displayName: 'Push SnpsGroup.SseGateway.Client (NuGet)'
+  condition: and(succeeded(), eq('${{ parameters.publishNuget }}', 'true'))
+  inputs:
+    command: 'push'
+    packagesToPush: '$(Build.ArtifactStagingDirectory)/nuget/*.nupkg'
+    nuGetFeedType: 'internal'
+    publishVstsFeed: '$(nugetSnpsGroupFeedId)'
+    allowPackageConflicts: true
+
+- task: DotNetCoreCLI@2
+  displayName: 'Publish Gateway Web Application'
+  condition: and(succeeded(), eq(variables['IsWebProject'], 'true'))
+  inputs:
+    command: custom
+    custom: 'publish'
+    publishWebProjects: false
+    projects: '**/${{ parameters.mainCsproj }}.csproj'
+    arguments: >-
+      --configuration ${{ parameters.buildConfiguration }}
+      --no-build
+      --output $(Build.ArtifactStagingDirectory)/app/${{ parameters.projectName }}
+      -p:Platform="x64"
+
+- task: PowerShell@2
+  displayName: 'Validate Published Artifacts'
+  condition: succeeded()
+  inputs:
+    targetType: 'inline'
+    script: |
+      $artifactPath = "$(Build.ArtifactStagingDirectory)/app/${{ parameters.projectName }}"
+
+      Write-Host "=== VALIDATING PUBLISHED ARTIFACTS ==="
+      Write-Host "Artifact Path: $artifactPath"
+
+      if (!(Test-Path $artifactPath)) {
+        throw "Artifact directory not found: $artifactPath"
+      }
+
+      $files = Get-ChildItem -Path $artifactPath -Recurse -File
+      Write-Host "Total files: $($files.Count)"
+
+      $essentialFiles = @(
+        "${{ parameters.mainCsproj }}.dll",
+        "${{ parameters.mainCsproj }}.exe",
+        "appsettings.json"
+      )
+
+      foreach ($file in $essentialFiles) {
+        $fullPath = Join-Path $artifactPath $file
+        if (Test-Path $fullPath) {
+          Write-Host "✅ Found: $file"
+        } else {
+          Write-Host "⚠️ Missing: $file"
+        }
+      }
+
+      $totalSize = ($files | Measure-Object -Property Length -Sum).Sum
+      $totalSizeMB = [math]::Round($totalSize / 1MB, 2)
+      Write-Host "Total artifact size: $totalSizeMB MB"
+
+      Write-Host "✅ Artifact validation completed"
+
+- task: PowerShell@2
+  displayName: 'Create Version Info File'
+  inputs:
+    targetType: 'inline'
+    pwsh: true
+    script: |
+      $versionInfo = [ordered]@{
+        product       = '${{ parameters.projectName }}'
+        fullVersion   = '$(FullVersion)'
+        fileVersion   = '$(FileVersionSafe)'
+        informational = '$(InformationalVersionSafe)'
+        ciType        = '$(CiType)'
+        gitTag        = '$(GitTag)'
+        commit        = '$(Build.SourceVersion)'
+        buildId       = '$(Build.BuildId)'
+        buildNumber   = '$(Build.BuildNumber)'
+        repo          = '$(Build.Repository.Name)'
+        branch        = '$(Build.SourceBranch)'
+        builtAt       = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ssK')
+        agentOS       = '$(Agent.OS)'
+      }
+
+      $options = [System.Text.Json.JsonSerializerOptions]::new()
+      $options.WriteIndented = $true
+      $json = [System.Text.Json.JsonSerializer]::Serialize($versionInfo, $options)
+
+      $outDir  = Join-Path '$(Build.ArtifactStagingDirectory)' 'app'
+      $outPath = Join-Path $outDir 'version.json'
+      New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+
+      [System.IO.File]::WriteAllText($outPath, $json, [System.UTF8Encoding]::new($false))
+      Write-Host "✅ version.json criado em $outPath"
+
+- task: PowerShell@2
+  displayName: 'Create Git Tag'
+  condition: and(succeeded(), eq('${{ parameters.createGitTag }}', 'true'), ne('${{ parameters.gitTag }}', ''))
+  inputs:
+    targetType: 'inline'
+    pwsh: true
+    script: |
+      try {
+        git config --global user.email "azuredevops@snpsgroup.com"
+        git config --global user.name "Azure DevOps Pipeline"
+
+        $gitTag = "${{ parameters.gitTag }}"
+        Write-Host "Creating Git tag: $gitTag"
+
+        $existingTag = git tag -l $gitTag 2>$null
+        if ([string]::IsNullOrEmpty($existingTag)) {
+          git tag -a $gitTag -m "Release $gitTag - Build $(Build.BuildNumber) - ${{ parameters.repository }}"
+          git push origin $gitTag
+          Write-Host "✅ Git tag $gitTag created and pushed successfully"
+        } else {
+          Write-Host "⚠️ Git tag $gitTag already exists, skipping creation"
+        }
+      }
+      catch {
+        Write-Warning "Failed to create Git tag: $($_.Exception.Message)"
+      }
+
+- task: PublishPipelineArtifact@1
+  displayName: 'Publish Application Artifacts'
+  condition: and(succeeded(), eq('${{ parameters.publishArtifacts }}', 'true'))
+  inputs:
+    targetPath: '$(Build.ArtifactStagingDirectory)/app/${{ parameters.projectName }}'
+    artifactName: '${{ parameters.repository }}'
+    publishLocation: 'pipeline'
+
+- task: PublishPipelineArtifact@1
+  displayName: 'Publish Deployment Scripts'
+  condition: and(succeeded(), eq('${{ parameters.publishArtifacts }}', 'true'))
+  inputs:
+    targetPath: '$(Build.SourcesDirectory)/scripts/'
+    artifactName: 'DeploymentScripts'
+    publishLocation: 'pipeline'
+
+- task: PowerShell@2
+  displayName: 'Build Summary'
+  condition: always()
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "=== BUILD SUMMARY ==="
+      Write-Host "Project: ${{ parameters.projectName }}"
+      Write-Host "Repository: ${{ parameters.repository }}"
+      Write-Host "Version: ${{ parameters.fullVersion }}"
+      Write-Host "Configuration: ${{ parameters.buildConfiguration }}"
+      Write-Host "Build Status: $(Agent.JobStatus)"
+      Write-Host "Build Time: $(Get-Date)"
+
+      if ("$(Agent.JobStatus)" -eq "Succeeded") {
+        Write-Host "🎉 BUILD COMPLETED SUCCESSFULLY!"
+      } else {
+        Write-Host "💥 BUILD FAILED - Check logs above"
+      }
+
+      $artifactPath = "$(Build.ArtifactStagingDirectory)"
+      if (Test-Path $artifactPath) {
+        $artifacts = Get-ChildItem -Path $artifactPath -Recurse -File
+        $totalSize = ($artifacts | Measure-Object -Property Length -Sum).Sum
+        $totalSizeMB = [math]::Round($totalSize / 1MB, 2)
+        Write-Host "Total artifacts size: $totalSizeMB MB"
+      }

@@ -1,0 +1,130 @@
+﻿# Template reutilizável de deployment
+parameters:
+- name: environment
+  type: string
+- name: fullVersion
+  type: string
+- name: websiteName
+  type: string
+- name: appPoolName
+  type: string
+- name: domainName
+  type: string
+- name: repository
+  type: string
+  default: 'SnpsGroup.Signal'
+
+steps:
+- download: current
+  artifact: ${{ parameters.repository }}
+  displayName: 'Download Application Artifacts'
+
+- download: current
+  artifact: DeploymentScripts
+  displayName: 'Download Deployment Scripts'
+
+- task: PowerShell@2
+  displayName: 'Deploy Application to IIS'
+  inputs:
+    targetType: 'inline'
+    script: |
+      try {
+        # Importar e executar script de configuração IIS
+        & "$(Pipeline.Workspace)/DeploymentScripts/Initialize-SnpsGroupIIS.ps1" -Environment "${{ parameters.environment }}" -Version "${{ parameters.fullVersion }}"
+
+        # Parar website para deployment
+        Import-Module WebAdministration
+        if (Get-Website -Name "${{ parameters.websiteName }}" -ErrorAction SilentlyContinue) {
+          Stop-Website -Name "${{ parameters.websiteName }}"
+          Write-Host "✓ Website ${{ parameters.websiteName }} parado"
+        }
+
+        # Determinar path de deployment
+        $versionSuffix = if ("${{ parameters.environment }}" -eq "Production") { "400" } else { "200" }
+        $deployPath = "C:\AzureDevops\${{ parameters.environment }}\${{ parameters.repository }}\${{ parameters.fullVersion }}.$versionSuffix"
+
+        Write-Host "📂 Deployment path: $deployPath"
+
+        # Copiar arquivos da aplicação
+        $sourcePath = "$(Pipeline.Workspace)/${{ parameters.repository }}/*"
+        Copy-Item -Path $sourcePath -Destination $deployPath -Recurse -Force
+        Write-Host "✓ Arquivos copiados"
+
+        # Aplicar configuração por ambiente
+        $appSettingsEnv = Join-Path $deployPath "appsettings.${{ parameters.environment }}.json"
+        $appSettingsMain = Join-Path $deployPath "appsettings.json"
+
+        if (Test-Path $appSettingsEnv) {
+          Copy-Item -Path $appSettingsEnv -Destination $appSettingsMain -Force
+          Write-Host "✓ appsettings.${{ parameters.environment }}.json aplicado"
+        }
+
+        # Configurar variável de ambiente ASPNETCORE_ENVIRONMENT no web.config
+        $webConfigPath = Join-Path $deployPath "web.config"
+
+        if (Test-Path $webConfigPath) {
+          [xml]$webConfig = Get-Content $webConfigPath
+
+          $aspNetCoreNode = $webConfig.SelectSingleNode("//aspNetCore")
+
+          if ($aspNetCoreNode -ne $null) {
+            $existingEnvVars = $aspNetCoreNode.SelectSingleNode("environmentVariables")
+            if ($existingEnvVars -ne $null) {
+              $aspNetCoreNode.RemoveChild($existingEnvVars) | Out-Null
+            }
+
+            $envVarsNode = $webConfig.CreateElement("environmentVariables")
+            $envVarNode = $webConfig.CreateElement("environmentVariable")
+            $envVarNode.SetAttribute("name", "ASPNETCORE_ENVIRONMENT")
+            $envVarNode.SetAttribute("value", "${{ parameters.environment }}")
+            $envVarsNode.AppendChild($envVarNode) | Out-Null
+            $aspNetCoreNode.AppendChild($envVarsNode) | Out-Null
+
+            $webConfig.Save($webConfigPath)
+            Write-Host "✓ ASPNETCORE_ENVIRONMENT=${{ parameters.environment }} configurado no web.config"
+          }
+          else {
+            Write-Warning "⚠️ Nó aspNetCore não encontrado no web.config"
+          }
+        }
+        else {
+          Write-Warning "⚠️ web.config não encontrado em $deployPath"
+        }
+
+        # Iniciar website
+        Start-Website -Name "${{ parameters.websiteName }}"
+        Write-Host "✓ Website iniciado"
+
+        # Health check
+        Start-Sleep -Seconds 10
+        $healthUrl = "https://${{ parameters.domainName }}/health"
+
+        for ($i = 1; $i -le 3; $i++) {
+          try {
+            $response = Invoke-WebRequest -Uri $healthUrl -TimeoutSec 30 -UseBasicParsing
+            if ($response.StatusCode -eq 200) {
+              Write-Host "✅ Health check OK (tentativa $i)"
+              break
+            }
+          }
+          catch {
+            Write-Warning "⚠️ Health check falhou (tentativa $i): $($_.Exception.Message)"
+            if ($i -eq 3) { throw "Health check falhou após 3 tentativas" }
+            Start-Sleep -Seconds 10
+          }
+        }
+
+        Write-Host "🚀 Deployment ${{ parameters.environment }} concluído!"
+        Write-Host "   Versão: ${{ parameters.fullVersion }}"
+        Write-Host "   URL: https://${{ parameters.domainName }}"
+      }
+      catch {
+        Write-Error "❌ Erro no deployment: $($_.Exception.Message)"
+
+        try {
+          Start-Website -Name "${{ parameters.websiteName }}" -ErrorAction SilentlyContinue
+        }
+        catch { }
+
+        throw
+      }

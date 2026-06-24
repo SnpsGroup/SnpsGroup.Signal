@@ -1,0 +1,59 @@
+root = true
+
+# Padrões globais
+[*]
+charset = utf-8
+end_of_line = crlf
+insert_final_newline = true
+indent_style = space
+trim_trailing_whitespace = true
+
+# Arquivos C#
+[*.cs]
+indent_size = 4
+
+# Convenções de nomenclatura
+dotnet_naming_rule.interfaces_should_be_prefixed_with_i.severity = warning
+dotnet_naming_rule.interfaces_should_be_prefixed_with_i.symbols = interface
+dotnet_naming_rule.interfaces_should_be_prefixed_with_i.style = begins_with_i
+
+dotnet_naming_symbols.interface.applicable_kinds = interface
+dotnet_naming_symbols.interface.applicable_accessibilities = public, internal, private, protected, protected_internal
+
+dotnet_naming_style.begins_with_i.required_prefix = I
+dotnet_naming_style.begins_with_i.capitalization = pascal_case
+
+# Async methods devem terminar com Async
+dotnet_naming_rule.async_methods_should_end_with_async.severity = warning
+dotnet_naming_rule.async_methods_should_end_with_async.symbols = async_method
+dotnet_naming_rule.async_methods_should_end_with_async.style = ends_with_async
+
+dotnet_naming_symbols.async_method.applicable_kinds = method
+dotnet_naming_symbols.async_method.required_modifiers = async
+
+dotnet_naming_style.ends_with_async.required_suffix = Async
+dotnet_naming_style.ends_with_async.capitalization = pascal_case
+
+# Preferências de código
+csharp_prefer_braces = true:warning
+csharp_using_directive_placement = outside_namespace:warning
+csharp_prefer_simple_using_statement = true:suggestion
+csharp_style_namespace_declarations = file_scoped:warning
+
+# Nullable reference types
+dotnet_diagnostic.CS8618.severity = error  # Non-nullable field must contain non-null value
+dotnet_diagnostic.CS8602.severity = error  # Dereference of a possibly null reference
+dotnet_diagnostic.CS8603.severity = error  # Possible null reference return
+
+# Performance
+dotnet_diagnostic.CA1848.severity = warning  # Use LoggerMessage delegates
+dotnet_diagnostic.CA1852.severity = warning  # Seal internal types
+
+[*.json]
+indent_size = 2
+
+[*.yml]
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false
