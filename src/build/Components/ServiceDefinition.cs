@@ -17,7 +17,7 @@ public static class ServiceDefinitions
         ImageName: "snpsgroup/signal/gateway",
         ContainerNamePrefix: "signal-gateway",
         ExposesPort: true,
-        DockerfilePath: "src/SnpsGroup.SseGateway/Dockerfile"
+        DockerfilePath: "SnpsGroup.SseGateway/Dockerfile"
     );
 
     public static IReadOnlyList<ServiceDefinition> All =>
