@@ -159,6 +159,7 @@ partial class Build : NukeBuild
             }
             catch { /* OpenBao may not be available in all contexts */ }
         }
+        nugetToken ??= EnvironmentInfo.GetVariable("DOCKER_REGISTRY_PASSWORD");
         nugetToken ??= SnpsGroup.Nuke.Target.Common.Constants.ProgetNugetApiKey;
 
         Log.Information("Building image {Tag} from {Dockerfile}", tag, dockerfile);
