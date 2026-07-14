@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>_build</RootNamespace>
+    <Platforms>x64</Platforms>
+    <NukeTelemetryVersion>1</NukeTelemetryVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Nuke.Common" Version="9.0.4" />
+    <PackageReference Include="SnpsGroup.Nuke.Target.Common" Version="1.0.15-Alpha" />
+    <PackageReference Include="Polly" Version="8.3.0" />
+    <PackageReference Include="System.Net.Http.Json" Version="10.0.0" />
+  </ItemGroup>
+
+</Project>

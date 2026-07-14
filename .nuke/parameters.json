@@ -1,0 +1,4 @@
+{
+  "$schema": "build.schema.json",
+  "Solution": "SnpsGroup.Signal.sln"
+}
