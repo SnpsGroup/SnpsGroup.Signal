@@ -4,6 +4,14 @@ WORKDIR /app
 EXPOSE 7089
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 
+# Health-check helper: resolves the actual port from ASPNETCORE_URLS so the
+# same image works with --network host on any environment port (dev/staging/prod).
+RUN printf '%s\n' \
+    '#!/bin/sh' \
+    'PORT=$(echo "${ASPNETCORE_URLS:-http://*:7089}" | sed "s/.*://")' \
+    'curl -f "http://localhost:${PORT}/health" || exit 1' \
+    > /usr/local/bin/healthcheck.sh && chmod +x /usr/local/bin/healthcheck.sh
+
 # ─── Stage 2: SDK build ───────────────────────────────────────────────────────
 FROM mcr.microsoft.com/dotnet/sdk:10.0-noble AS build
 ARG NUGET_TOKEN
@@ -16,6 +24,7 @@ COPY global.json ./
 COPY Directory.Build.props ./
 
 COPY src/SnpsGroup.SseGateway/SnpsGroup.SseGateway.csproj src/SnpsGroup.SseGateway/
+COPY src/SnpsGroup.SseGateway.Client/SnpsGroup.SseGateway.Client.csproj src/SnpsGroup.SseGateway.Client/
 
 RUN dotnet restore src/SnpsGroup.SseGateway/SnpsGroup.SseGateway.csproj --configfile NuGet.config
 
@@ -35,7 +44,7 @@ WORKDIR /app
 COPY --from=publish --chown=app:app /app/publish .
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:7089/health || exit 1
+    CMD ["/usr/local/bin/healthcheck.sh"]
 
 ENV ASPNETCORE_URLS=http://+:7089
 USER app

@@ -379,6 +379,7 @@ tasks/
 /AGENTS.md
 /CLAUDE.md
 /deploy-files
+/deploy
 /artifacts
 /.local-nuget-feed
 /.github

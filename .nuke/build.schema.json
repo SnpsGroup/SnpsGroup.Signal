@@ -1,0 +1,186 @@
+{
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "definitions": {
+    "Configuration": {
+      "type": "string",
+      "description": "",
+      "enum": [
+        "Debug",
+        "Release"
+      ]
+    },
+    "Host": {
+      "type": "string",
+      "enum": [
+        "AppVeyor",
+        "AzurePipelines",
+        "Bamboo",
+        "Bitbucket",
+        "Bitrise",
+        "GitHubActions",
+        "GitLab",
+        "Jenkins",
+        "Rider",
+        "SpaceAutomation",
+        "TeamCity",
+        "Terminal",
+        "TravisCI",
+        "VisualStudio",
+        "VSCode"
+      ]
+    },
+    "ExecutableTarget": {
+      "type": "string",
+      "enum": [
+        "Clean",
+        "Compile",
+        "Default",
+        "Deploy",
+        "DockerBlueGreenSwapAll",
+        "DockerBuildAll",
+        "DockerCleanupAll",
+        "DockerLogin",
+        "DockerPullAll",
+        "DockerPushAll",
+        "PackLibraries",
+        "PrepareEnvironment",
+        "PushNuGet",
+        "Restore",
+        "Rollback",
+        "Test",
+        "ValidateSecrets"
+      ]
+    },
+    "Verbosity": {
+      "type": "string",
+      "description": "",
+      "enum": [
+        "Verbose",
+        "Normal",
+        "Minimal",
+        "Quiet"
+      ]
+    },
+    "NukeBuild": {
+      "properties": {
+        "Continue": {
+          "type": "boolean",
+          "description": "Indicates to continue a previously failed build attempt"
+        },
+        "Help": {
+          "type": "boolean",
+          "description": "Shows the help text for this build assembly"
+        },
+        "Host": {
+          "description": "Host for execution. Default is 'automatic'",
+          "$ref": "#/definitions/Host"
+        },
+        "NoLogo": {
+          "type": "boolean",
+          "description": "Disables displaying the NUKE logo"
+        },
+        "Partition": {
+          "type": "string",
+          "description": "Partition to use on CI"
+        },
+        "Plan": {
+          "type": "boolean",
+          "description": "Shows the execution plan (HTML)"
+        },
+        "Profile": {
+          "type": "array",
+          "description": "Defines the profiles to load",
+          "items": {
+            "type": "string"
+          }
+        },
+        "Root": {
+          "type": "string",
+          "description": "Root directory during build execution"
+        },
+        "Skip": {
+          "type": "array",
+          "description": "List of targets to be skipped. Empty list skips all dependencies",
+          "items": {
+            "$ref": "#/definitions/ExecutableTarget"
+          }
+        },
+        "Target": {
+          "type": "array",
+          "description": "List of targets to be invoked. Default is '{default_target}'",
+          "items": {
+            "$ref": "#/definitions/ExecutableTarget"
+          }
+        },
+        "Verbosity": {
+          "description": "Logging verbosity during build execution. Default is 'Normal'",
+          "$ref": "#/definitions/Verbosity"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "properties": {
+        "CloudProvider": {
+          "type": "string",
+          "description": "Cloud provider name for versioning API"
+        },
+        "Configuration": {
+          "description": "Build configuration",
+          "$ref": "#/definitions/Configuration"
+        },
+        "DeployEnvironment": {
+          "type": "string",
+          "description": "Target deployment environment (development|staging|production)"
+        },
+        "DockerRegistry": {
+          "type": "string",
+          "description": "Docker registry base URL"
+        },
+        "DockerRegistryPassword": {
+          "type": "string",
+          "description": "Docker registry password",
+          "default": "Secrets must be entered via 'nuke :secrets [profile]'"
+        },
+        "DockerRegistryServer": {
+          "type": "string",
+          "description": "Docker registry server (hostname only, for docker login)"
+        },
+        "DockerRegistryUsername": {
+          "type": "string",
+          "description": "Docker registry username"
+        },
+        "NUGET_API_KEY": {
+          "type": "string",
+          "description": "NuGet API Key",
+          "default": "Secrets must be entered via 'nuke :secrets [profile]'"
+        },
+        "NuGetFeedUrl": {
+          "type": "string",
+          "description": "NuGet feed URL"
+        },
+        "OPENBAO_ROLE_ID": {
+          "type": "string",
+          "description": "OpenBao Role ID"
+        },
+        "OPENBAO_SECRET_ID": {
+          "type": "string",
+          "description": "OpenBao Secret ID",
+          "default": "Secrets must be entered via 'nuke :secrets [profile]'"
+        },
+        "RollbackEnabled": {
+          "type": "boolean",
+          "description": "Enable rollback on failed health check"
+        },
+        "SNPS_IMAGE_VERSION": {
+          "type": "string",
+          "description": "Image version / semver tag"
+        }
+      }
+    },
+    {
+      "$ref": "#/definitions/NukeBuild"
+    }
+  ]
+}
