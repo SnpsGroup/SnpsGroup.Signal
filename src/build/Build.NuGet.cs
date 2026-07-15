@@ -60,10 +60,17 @@ partial class Build
             if (string.IsNullOrEmpty(apiKey))
             {
                 Log.Information("NuGetApiKey not in env — fetching from OpenBao signal/shared");
-                var sharedSecrets = await GetSecretsFromOpenBaoAsync("signal/shared");
-                apiKey = sharedSecrets.GetValueOrDefault("NuGetApiKey")
-                         ?? sharedSecrets.GetValueOrDefault("NugetApiKey");
+                try
+                {
+                    var sharedSecrets = await GetSecretsFromOpenBaoAsync("signal/shared");
+                    apiKey = sharedSecrets.GetValueOrDefault("NuGetApiKey")
+                             ?? sharedSecrets.GetValueOrDefault("NugetApiKey");
+                }
+                catch { /* OpenBao may not be available in all contexts */ }
             }
+
+            apiKey ??= EnvironmentInfo.GetVariable("DOCKER_REGISTRY_PASSWORD");
+            apiKey ??= SnpsGroup.Nuke.Target.Common.Constants.ProgetNugetApiKey;
 
             if (string.IsNullOrEmpty(apiKey))
                 throw new Exception("NuGet API key not found. Set NUGET_API_KEY env var or configure OpenBao signal/shared.");
