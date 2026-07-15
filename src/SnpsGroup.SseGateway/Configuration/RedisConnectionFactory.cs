@@ -7,23 +7,30 @@ namespace SnpsGroup.SseGateway.Configuration;
 /// <summary>
 /// Manages a shared Redis connection for the gateway.
 /// Ensures a single ConnectionMultiplexer per gateway instance.
+/// Connection is established lazily so the container can start and serve
+/// liveness checks (e.g. /health) even when Redis is temporarily unreachable.
 /// </summary>
 public sealed class RedisConnectionFactory : IDisposable
 {
-    private readonly ConnectionMultiplexer _connection;
+    private readonly Lazy<ConnectionMultiplexer> _connection;
+    private readonly Lazy<IDatabase> _database;
 
-    public IDatabase Database { get; }
+    public IDatabase Database => _database.Value;
 
     public RedisConnectionFactory(IOptions<SseGatewayOptions> options)
     {
         var connectionString = options.Value.RedisConnectionString;
-        _connection = ConnectionMultiplexer.Connect(connectionString);
-        Database = _connection.GetDatabase();
+        _connection = new Lazy<ConnectionMultiplexer>(() => ConnectionMultiplexer.Connect(connectionString));
+        _database = new Lazy<IDatabase>(() => _connection.Value.GetDatabase());
     }
 
     public void Dispose()
     {
-        _connection.Dispose();
+        if (_connection.IsValueCreated)
+        {
+            _connection.Value.Dispose();
+        }
+
         GC.SuppressFinalize(this);
     }
 }
