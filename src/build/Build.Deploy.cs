@@ -32,13 +32,12 @@ internal partial class Build
             return _openBaoToken;
         }
 
-        Log.Information("Authenticating with OpenBao AppRole at {Url}...", OpenBaoBaseUrl);
+        Log.Information("Authenticating with OpenBao AppRole...");
         using var http = new HttpClient { BaseAddress = new Uri(OpenBaoBaseUrl) };
         var vaultNamespace = EnvironmentInfo.GetVariable("VAULT_NAMESPACE");
         if (!string.IsNullOrEmpty(vaultNamespace))
             http.DefaultRequestHeaders.Add("X-Vault-Namespace", vaultNamespace);
         var payload = JsonSerializer.Serialize(new { role_id = OpenBaoRoleId, secret_id = OpenBaoSecretId });
-        Log.Information("AppRole payload length: {Length}", payload.Length);
         var response = await http.PostAsync("v1/auth/approle/login",
             new StringContent(payload, Encoding.UTF8, "application/json"));
         if (!response.IsSuccessStatusCode)
