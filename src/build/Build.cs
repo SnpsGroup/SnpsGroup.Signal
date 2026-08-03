@@ -106,8 +106,9 @@ partial class Build : NukeBuild
         .Executes(() =>
         {
             DotNetTasks.DotNetTest(s => s
-                .SetProjectFile(SourceDirectory / "SnpsGroup.SseGateway.Tests" / "SnpsGroup.SseGateway.Tests.csproj")
+                .SetProjectFile(RootDirectory / "tests" / "SnpsGroup.SseGateway.Tests" / "SnpsGroup.SseGateway.Tests.csproj")
                 .SetConfiguration(Configuration.ToString())
+                .SetProperty("Platform", "x64")
                 .EnableNoRestore()
                 .EnableNoBuild());
         });
@@ -160,7 +161,13 @@ partial class Build : NukeBuild
             catch { /* OpenBao may not be available in all contexts */ }
         }
         nugetToken ??= EnvironmentInfo.GetVariable("DOCKER_REGISTRY_PASSWORD");
-        nugetToken ??= SnpsGroup.Nuke.Target.Common.Constants.ProgetNugetApiKey;
+
+        if (string.IsNullOrEmpty(nugetToken))
+        {
+            throw new Exception(
+                "NuGet token not found for Docker build. Set NUGET_API_KEY, configure OpenBao " +
+                "signal/shared (NuGetApiKey), or set DOCKER_REGISTRY_PASSWORD.");
+        }
 
         Log.Information("Building image {Tag} from {Dockerfile}", tag, dockerfile);
 

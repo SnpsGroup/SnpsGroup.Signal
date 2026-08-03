@@ -99,7 +99,7 @@ partial class Build
         var prodCommand = "run -d --name " + blueName + " --restart unless-stopped " + prodArgs;
         ProcessTasks.StartProcess("docker", prodCommand).AssertZeroExitCode();
 
-        var prodHealthy = await WaitForHealthy(svc, env, blueName, env.HealthCheckRetries / 3, env.HealthCheckDelaySeconds);
+        var prodHealthy = await WaitForHealthy(svc, env, blueName, env.HealthCheckRetries, env.HealthCheckDelaySeconds);
 
         if (!prodHealthy && RollbackEnabled)
         {
@@ -140,7 +140,7 @@ partial class Build
             var cmd = "run -d --name " + blueName + " --restart unless-stopped " + rollbackArgs;
             ProcessTasks.StartProcess("docker", cmd).AssertZeroExitCode();
 
-            var healthy = await WaitForHealthy(svc, env, blueName, env.HealthCheckRetries / 3, env.HealthCheckDelaySeconds);
+            var healthy = await WaitForHealthy(svc, env, blueName, env.HealthCheckRetries, env.HealthCheckDelaySeconds);
             Log.Information("Rollback to {Tag} {Status}", stableTag, healthy ? "succeeded" : "failed — manual intervention required");
         }
         catch (Exception ex)
@@ -154,6 +154,11 @@ partial class Build
     {
         var args = new System.Text.StringBuilder();
         args.Append("--network host ");
+
+        // Stable per-host hostname: the app's Redis cursor instanceId is Environment.MachineName,
+        // so this keeps the cursor stable across container recreations and unique per svcfabric replica.
+        var hostname = $"{GetContainerNamePrefix(svc, env)}-{Environment.MachineName}".ToLowerInvariant();
+        args.Append($"--hostname {hostname} ");
 
         args.Append("--add-host adptv-sql-001:10.10.10.17 ");
         args.Append("--add-host sql01:10.10.10.17 ");

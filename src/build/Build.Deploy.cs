@@ -176,13 +176,14 @@ internal partial class Build
 
     private Target Rollback => _ => _
         .Description("Rollback all services to latest-stable image tag")
-        .DependsOn(DockerLogin)
+        .DependsOn(DockerLogin, PrepareEnvironment)
         .Executes(async () =>
         {
             var env = DeploymentConfig.FromName(DeployEnvironment);
             var deployDir = RootDirectory / "deploy" / DeployEnvironment;
             Log.Warning("Rollback requested for environment {Env} — pulling latest-stable tags", DeployEnvironment);
 
+            var failedServices = new List<string>();
             foreach (var svc in ServiceDefinitions.All)
             {
                 var stableTag = $"{DockerRegistry}/{svc.ImageName}:latest-stable";
@@ -201,11 +202,17 @@ internal partial class Build
 
                     var healthy = await WaitForHealthy(svc, env, blueName, env.HealthCheckRetries, env.HealthCheckDelaySeconds);
                     Log.Information("Rollback of {Service} {Status}", svc.DisplayName, healthy ? "succeeded" : "failed");
+                    if (!healthy)
+                        failedServices.Add(svc.DisplayName);
                 }
                 catch (Exception ex)
                 {
                     Log.Error(ex, "Rollback failed for {Service} — manual intervention required", svc.DisplayName);
+                    failedServices.Add(svc.DisplayName);
                 }
             }
+
+            if (failedServices.Count > 0)
+                throw new Exception($"Rollback failed for: {string.Join(", ", failedServices)}");
         });
 }
