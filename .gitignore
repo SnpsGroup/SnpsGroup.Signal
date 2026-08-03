@@ -383,3 +383,11 @@ tasks/
 /artifacts
 /.local-nuget-feed
 /.github
+
+# Session/Development artifacts - API response dumps, debug logs, temp files
+/*.json
+/*.txt
+/*.err
+/*.sh
+/logs_*/
+.playwright-cli/
