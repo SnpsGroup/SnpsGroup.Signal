@@ -110,11 +110,12 @@ internal partial class Build
                 var rendered = template
                     .Replace("{{ENVIRONMENT_CAPITALIZED}}", envCaps)
                     .Replace("{{API_PORT}}", config.ApiExternalPort.ToString())
-                    .Replace("{{REDIS_CONNECTION_STRING}}", SanitizeSecretValue(allSecrets.GetValueOrDefault("redis-connection-string", "")))
+                    .Replace("{{REDIS_CONNECTION_STRING}}", SanitizeSecretValue(ResolveRedisConnectionString(envName, allSecrets)))
                     .Replace("{{API_KEY}}", allSecrets.GetValueOrDefault("api-key", ""))
                     .Replace("{{KEYCLOAK_URL}}", allSecrets.GetValueOrDefault("keycloak-url", ""))
                     .Replace("{{KEYCLOAK_REALM}}", allSecrets.GetValueOrDefault("keycloak-realm", "platform"))
                     .Replace("{{KEYCLOAK_CLIENT_ID}}", allSecrets.GetValueOrDefault("keycloak-client-id", "signal"))
+                    .Replace("{{KEYCLOAK_VALID_ISSUER}}", ResolveKeycloakValidIssuer(allSecrets))
                     .Replace("{{LOG_LEVEL}}", config.LogLevel)
                     .Replace("{{IMAGE_VERSION}}", _imageVersion ?? ImageVersion);
 
@@ -124,6 +125,32 @@ internal partial class Build
         });
 
     /// <summary>
+    /// Resolves the Redis connection string for the SSE Gateway.
+    /// Production and staging read it from OpenBao at <c>secret/signal/{environment}/redis-connection-string</c>.
+    /// Development (QA) uses the local <c>shared-redis</c> container from Infrastructure-Common,
+    /// bypassing OpenBao so the deploy does not require external secret access.
+    /// </summary>
+    private string ResolveRedisConnectionString(string envName, IReadOnlyDictionary<string, string> secrets)
+    {
+        if (envName.Equals("development", StringComparison.OrdinalIgnoreCase))
+        {
+            Log.Information("Development environment: using shared-redis:6379 from local Infrastructure-Common (skipping OpenBao)");
+            return "shared-redis:6379";
+        }
+
+        var fromOpenBao = secrets.GetValueOrDefault("redis-connection-string", "");
+        if (string.IsNullOrEmpty(fromOpenBao))
+        {
+            throw new Exception(
+                $"OpenBao secret 'redis-connection-string' is missing at secret/signal/{envName}/. " +
+                $"Required for environment '{envName}'.");
+        }
+
+        Log.Information("{Env} environment: using redis-connection-string from OpenBao (secret/signal/{Env}/redis-connection-string)", envName, envName);
+        return fromOpenBao;
+    }
+
+    /// <summary>
     /// Returns the host port the service should listen on with --network host.
     /// </summary>
     private static int GetServiceHostPort(ServiceDefinition svc, DeploymentConfig config) => svc.Name switch
@@ -131,6 +158,27 @@ internal partial class Build
         "sse-gateway" => config.ApiExternalPort,
         _ => throw new ArgumentOutOfRangeException(nameof(svc))
     };
+
+    /// <summary>
+    /// Resolves the explicit JWT issuer (<c>iss</c>) for the SSE Gateway.
+    /// Tokens are minted for the public Keycloak hostname (e.g. https://auth.snpsgroup.com),
+    /// but <c>keycloak-url</c> may be an internal Docker hostname (e.g. http://shared-keycloak)
+    /// whose OIDC discovery advertises a different issuer. Without an explicit
+    /// <c>ValidIssuer</c>, the gateway rejects valid tokens with 401 invalid_token.
+    /// Priority: explicit <c>keycloak-valid-issuer</c> secret, else derive from keycloak-url + realm.
+    /// </summary>
+    private static string ResolveKeycloakValidIssuer(IReadOnlyDictionary<string, string> secrets)
+    {
+        var explicitIssuer = secrets.GetValueOrDefault("keycloak-valid-issuer", "");
+        if (!string.IsNullOrWhiteSpace(explicitIssuer))
+        {
+            return explicitIssuer;
+        }
+
+        var url = (secrets.GetValueOrDefault("keycloak-url", "") ?? "").TrimEnd('/');
+        var realm = secrets.GetValueOrDefault("keycloak-realm", "platform");
+        return string.IsNullOrEmpty(url) ? string.Empty : $"{url}/realms/{realm}";
+    }
 
     /// <summary>
     /// Sanitize fallback connection strings from OpenBao so they use short hostnames
@@ -150,13 +198,14 @@ internal partial class Build
 
     private Target Rollback => _ => _
         .Description("Rollback all services to latest-stable image tag")
-        .DependsOn(DockerLogin)
+        .DependsOn(DockerLogin, PrepareEnvironment)
         .Executes(async () =>
         {
             var env = DeploymentConfig.FromName(DeployEnvironment);
             var deployDir = RootDirectory / "deploy" / DeployEnvironment;
             Log.Warning("Rollback requested for environment {Env} — pulling latest-stable tags", DeployEnvironment);
 
+            var failedServices = new List<string>();
             foreach (var svc in ServiceDefinitions.All)
             {
                 var stableTag = $"{DockerRegistry}/{svc.ImageName}:latest-stable";
@@ -175,11 +224,17 @@ internal partial class Build
 
                     var healthy = await WaitForHealthy(svc, env, blueName, env.HealthCheckRetries, env.HealthCheckDelaySeconds);
                     Log.Information("Rollback of {Service} {Status}", svc.DisplayName, healthy ? "succeeded" : "failed");
+                    if (!healthy)
+                        failedServices.Add(svc.DisplayName);
                 }
                 catch (Exception ex)
                 {
                     Log.Error(ex, "Rollback failed for {Service} — manual intervention required", svc.DisplayName);
+                    failedServices.Add(svc.DisplayName);
                 }
             }
+
+            if (failedServices.Count > 0)
+                throw new Exception($"Rollback failed for: {string.Join(", ", failedServices)}");
         });
 }

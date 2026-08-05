@@ -79,9 +79,13 @@ Default port: **7089**
 | `Keycloak:Realm` | Keycloak realm | `platform` |
 | `Keycloak:ClientId` | Keycloak client ID | `""` |
 | `Keycloak:RequireHttpsMetadata` | Require HTTPS for OIDC discovery | `true` |
-| `Keycloak:ValidIssuer` | Optional explicit issuer (overrides discovery) | `""` |
+| `Keycloak:ValidIssuer` | Optional explicit issuer (overrides discovery). Set when `Keycloak:Url` is an internal hostname whose discovery issuer differs from the token's `iss` claim. | `""` |
 
-Environment variables use the prefix `SSE_GW_` (e.g. `SSE_GW_SseGateway__RedisConnectionString`).
+Environment variables use the double-underscore notation bound to the `SseGateway` section
+(e.g. `SseGateway__Keycloak__Url`, `SseGateway__Keycloak__ValidIssuer`). In CI, these are
+rendered into a per-environment `.env` file from `src/build/Templates/sse-gateway.env.template`
+and injected via `docker run --env-file`; secrets are sourced from OpenBao
+(`signal/shared`, `signal/{environment}`).
 
 ### Endpoints
 
