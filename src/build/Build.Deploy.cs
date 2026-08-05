@@ -115,6 +115,7 @@ internal partial class Build
                     .Replace("{{KEYCLOAK_URL}}", allSecrets.GetValueOrDefault("keycloak-url", ""))
                     .Replace("{{KEYCLOAK_REALM}}", allSecrets.GetValueOrDefault("keycloak-realm", "platform"))
                     .Replace("{{KEYCLOAK_CLIENT_ID}}", allSecrets.GetValueOrDefault("keycloak-client-id", "signal"))
+                    .Replace("{{KEYCLOAK_VALID_ISSUER}}", ResolveKeycloakValidIssuer(allSecrets))
                     .Replace("{{LOG_LEVEL}}", config.LogLevel)
                     .Replace("{{IMAGE_VERSION}}", _imageVersion ?? ImageVersion);
 
@@ -131,6 +132,27 @@ internal partial class Build
         "sse-gateway" => config.ApiExternalPort,
         _ => throw new ArgumentOutOfRangeException(nameof(svc))
     };
+
+    /// <summary>
+    /// Resolves the explicit JWT issuer (<c>iss</c>) for the SSE Gateway.
+    /// Tokens are minted for the public Keycloak hostname (e.g. https://auth.snpsgroup.com),
+    /// but <c>keycloak-url</c> may be an internal Docker hostname (e.g. http://shared-keycloak)
+    /// whose OIDC discovery advertises a different issuer. Without an explicit
+    /// <c>ValidIssuer</c>, the gateway rejects valid tokens with 401 invalid_token.
+    /// Priority: explicit <c>keycloak-valid-issuer</c> secret, else derive from keycloak-url + realm.
+    /// </summary>
+    private static string ResolveKeycloakValidIssuer(IReadOnlyDictionary<string, string> secrets)
+    {
+        var explicitIssuer = secrets.GetValueOrDefault("keycloak-valid-issuer", "");
+        if (!string.IsNullOrWhiteSpace(explicitIssuer))
+        {
+            return explicitIssuer;
+        }
+
+        var url = (secrets.GetValueOrDefault("keycloak-url", "") ?? "").TrimEnd('/');
+        var realm = secrets.GetValueOrDefault("keycloak-realm", "platform");
+        return string.IsNullOrEmpty(url) ? string.Empty : $"{url}/realms/{realm}";
+    }
 
     /// <summary>
     /// Sanitize fallback connection strings from OpenBao so they use short hostnames
