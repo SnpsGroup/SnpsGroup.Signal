@@ -61,13 +61,18 @@ public class RedisStreamConsumer : BackgroundService, IRedisStreamConsumer
     public async Task ConsumeAsync(CancellationToken cancellationToken)
     {
         var db = _redisFactory.Database;
-        var cursorKey = $"{_options.CursorKeyPrefix}:{_instanceId}";
 
-        // Get last cursor or start from beginning (0-0 = earliest)
-        var lastId = await db.StringGetAsync(cursorKey).ConfigureAwait(false);
-        var readFrom = lastId.HasValue ? lastId.ToString() : "0-0";
+        // Start from the beginning of the stream ("0-0"). A fan-out consumer must not skip
+        // entries: an event published before (or while) the consumer was starting up must
+        // still be delivered. Starting at the live tail ("$") is wrong because "$" is the
+        // last ID at call time — entries published between two XREAD calls fall at or behind
+        // it and are never returned. The cursor advances forward in memory (readFrom) after
+        // each batch and is discarded on exit; DispatchToChannel only hands an entry to
+        // currently-subscribed sessions, so replaying the backlog on startup delivers only
+        // to clients that are actually connected and have not seen it yet.
+        var readFrom = "0-0";
 
-        _logger.LogInformation("Starting consumption from cursor: {Cursor}", readFrom);
+        _logger.LogInformation("Starting consumption from beginning: {Cursor}", readFrom);
 
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -78,16 +83,23 @@ public class RedisStreamConsumer : BackgroundService, IRedisStreamConsumer
                 continue;
             }
 
-            // XREAD STREAM key AFTER cursor COUNT batchSize BLOCK timeoutMs
-            var entries = await db.StreamReadAsync(
-                _options.StreamKey,
-                readFrom,
-                _options.StreamReadBatchSize).ConfigureAwait(false);
+            // XREAD BLOCK <timeoutMs> COUNT <batch> STREAMS <key> <id>
+            // Blocking server-side read: the call parks on Redis until an entry arrives or
+            // the timeout elapses, instead of polling and racing the publisher. This is what
+            // makes fan-out reliable — the consumer is already waiting when the event lands.
+            var result = await db.ExecuteAsync(
+                "XREAD",
+                new object[]
+                {
+                    "BLOCK", _options.StreamReadTimeoutMs,
+                    "COUNT", _options.StreamReadBatchSize,
+                    "STREAMS", _options.StreamKey, readFrom!
+                }).ConfigureAwait(false);
 
+            var entries = ParseXReadResult(result);
             if (entries is null || entries.Length == 0)
             {
-                // No new messages — brief pause to avoid busy loop
-                await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+                // Timed out with no new entries — loop and block again.
                 continue;
             }
 
@@ -118,9 +130,57 @@ public class RedisStreamConsumer : BackgroundService, IRedisStreamConsumer
                 }
             }
 
-            // Persist cursor after batch
-            await db.StringSetAsync(cursorKey, readFrom, TimeSpan.FromHours(24)).ConfigureAwait(false);
+            // Cursor is kept in memory (readFrom) for the lifetime of this process and is
+            // NOT persisted to Redis. A persisted cursor is what caused events to be skipped
+            // after a restart: the retained cursor could sit ahead of freshly-published
+            // entries. Each run starts at the live tail ("$") and advances only forward.
         }
+    }
+
+    /// <summary>
+    /// Parses the raw XREAD reply into stream entries. The reply is a nested array:
+    /// [[streamKey, [[entryId, [field, value, ...]], ...]]]. Null/empty means no entries.
+    /// </summary>
+    private static StreamEntry[] ParseXReadResult(RedisResult result)
+    {
+        if (result.IsNull)
+        {
+            return Array.Empty<StreamEntry>();
+        }
+
+        var outer = (RedisResult[])result!;
+        if (outer.Length == 0)
+        {
+            return Array.Empty<StreamEntry>();
+        }
+
+        // outer[0] = [streamKey, entriesArray]
+        var streamPair = (RedisResult[])outer[0]!;
+        if (streamPair.Length < 2)
+        {
+            return Array.Empty<StreamEntry>();
+        }
+
+        var entriesArray = (RedisResult[])streamPair[1]!;
+        var entries = new StreamEntry[entriesArray.Length];
+        for (var i = 0; i < entriesArray.Length; i++)
+        {
+            entries[i] = ParseStreamEntry((RedisResult[])entriesArray[i]!);
+        }
+        return entries;
+    }
+
+    private static StreamEntry ParseStreamEntry(RedisResult[] entryPair)
+    {
+        // entryPair = [entryId, [field, value, field, value, ...]]
+        var id = (RedisValue)entryPair[0];
+        var fields = (RedisResult[])entryPair[1]!;
+        var pairs = new NameValueEntry[fields.Length / 2];
+        for (var i = 0; i < fields.Length; i += 2)
+        {
+            pairs[i / 2] = new NameValueEntry((RedisValue)fields[i], (RedisValue)fields[i + 1]);
+        }
+        return new StreamEntry(id, pairs);
     }
 
     private static SseEvent? ParseEntry(StreamEntry entry)

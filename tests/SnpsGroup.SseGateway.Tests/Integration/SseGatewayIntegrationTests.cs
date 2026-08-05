@@ -12,6 +12,7 @@ public class SseGatewayIntegrationTests : IAsyncLifetime
 
     private WebApplicationFactory<Program>? _factory;
     private HttpClient? _client;
+    private StackExchange.Redis.ConnectionMultiplexer? _redis;
 
     public async Task InitializeAsync()
     {
@@ -26,12 +27,64 @@ public class SseGatewayIntegrationTests : IAsyncLifetime
             });
 
         _client = _factory.CreateClient();
+
+        // Shared multiplexer: a synchronous Connect() per test added ~30s of setup latency
+        // (slow handshake in the test host), which raced the publish against the 30s heartbeat.
+        // Reusing one connection keeps publishes instant.
+        _redis = await StackExchange.Redis.ConnectionMultiplexer.ConnectAsync(_redisContainer.GetConnectionString());
     }
 
     public async Task DisposeAsync()
     {
+        _redis?.Dispose();
         _factory?.Dispose();
         await _redisContainer.DisposeAsync();
+    }
+
+    /// <summary>
+    /// Reads SSE lines until one matches <paramref name="contains"/>, skipping heartbeat
+    /// frames. Heartbeats (sent every 30s) can interleave with published events, so a single
+    /// ReadLine would assert against a heartbeat and miss the payload.
+    /// </summary>
+    private static async Task<string?> ReadLineContainingAsync(StreamReader reader, string contains, TimeSpan timeout)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        while (!cts.Token.IsCancellationRequested)
+        {
+            var readTask = reader.ReadLineAsync(cts.Token);
+            var line = await readTask.ConfigureAwait(false);
+            if (line is not null && line.Contains(contains, StringComparison.Ordinal))
+            {
+                return line;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Drains SSE lines for the timeout window and returns true if any line matches
+    /// <paramref name="contains"/>. Heartbeats are tolerated (they broadcast to all sessions);
+    /// only a match on the payload indicates a channel-isolation leak.
+    /// </summary>
+    private static async Task<bool> LineContainingSeenAsync(StreamReader reader, string contains, TimeSpan timeout)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        while (!cts.Token.IsCancellationRequested)
+        {
+            try
+            {
+                var line = await reader.ReadLineAsync(cts.Token).ConfigureAwait(false);
+                if (line is not null && line.Contains(contains, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+        }
+        return false;
     }
 
     [Fact]
@@ -77,8 +130,7 @@ public class SseGatewayIntegrationTests : IAsyncLifetime
         var reader = new StreamReader(stream);
 
         // Publish event to Redis Stream
-        var redis = StackExchange.Redis.ConnectionMultiplexer.Connect(_redisContainer.GetConnectionString());
-        var db = redis.GetDatabase();
+        var db = _redis!.GetDatabase();
         await db.StreamAddAsync("sse:events",
         [
             new StackExchange.Redis.NameValueEntry("id", "test-1"),
@@ -88,16 +140,9 @@ public class SseGatewayIntegrationTests : IAsyncLifetime
             new StackExchange.Redis.NameValueEntry("timestamp", DateTime.UtcNow.ToString("O"))
         ]);
 
-        // Read SSE output with timeout
-        var readTask = reader.ReadLineAsync();
-        var completed = await Task.WhenAny(readTask, Task.Delay(5000));
-
-        completed.Should().Be(readTask, "SSE client should receive an event within timeout");
-        var line = await readTask;
-        line.Should().NotBeNull();
-        line.Should().Contain("hello");
-
-        redis.Dispose();
+        // Read SSE output, skipping heartbeats until the published payload arrives
+        var line = await ReadLineContainingAsync(reader, "hello", TimeSpan.FromSeconds(15));
+        line.Should().NotBeNull("SSE client should receive the published event within timeout");
     }
 
     [Fact]
@@ -111,8 +156,7 @@ public class SseGatewayIntegrationTests : IAsyncLifetime
         var readerB = new StreamReader(await responseB.Content.ReadAsStreamAsync());
 
         // Publish event only to channel A
-        var redis = StackExchange.Redis.ConnectionMultiplexer.Connect(_redisContainer.GetConnectionString());
-        var db = redis.GetDatabase();
+        var db = _redis!.GetDatabase();
         await db.StreamAddAsync("sse:events",
         [
             new StackExchange.Redis.NameValueEntry("id", "iso-1"),
@@ -122,10 +166,13 @@ public class SseGatewayIntegrationTests : IAsyncLifetime
             new StackExchange.Redis.NameValueEntry("timestamp", DateTime.UtcNow.ToString("O"))
         ]);
 
-        // Reader A should get the event
-        var readA = await readerA.ReadLineAsync();
+        // Reader A should get the event (skip heartbeats)
+        var readA = await ReadLineContainingAsync(readerA, "target", TimeSpan.FromSeconds(15));
         readA.Should().Contain("target");
 
-        redis.Dispose();
+        // Reader B may receive heartbeats (broadcast to all sessions), but must NOT receive
+        // channel A's event payload. Drain lines for a short window and assert isolation.
+        var leakedToB = await LineContainingSeenAsync(readerB, "target", TimeSpan.FromSeconds(2));
+        leakedToB.Should().BeFalse("channel B must not receive channel A's event");
     }
 }
