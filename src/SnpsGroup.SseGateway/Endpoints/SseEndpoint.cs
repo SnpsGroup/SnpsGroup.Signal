@@ -11,6 +11,7 @@ public static class SseEndpoint
 {
     public static IResult Handle(
         string channel,
+        HttpContext httpContext,
         ISseSessionManager sessionManager,
         ILoggerFactory loggerFactory,
         CancellationToken cancellationToken)
@@ -31,6 +32,9 @@ public static class SseEndpoint
         try
         {
             var stream = sessionManager.AddSession(channel, connectionId, cancellationToken);
+            // Tells reverse proxies (nginx/YARP) not to buffer this response, so SSE
+            // events reach the client as they are produced instead of in batches.
+            httpContext.Response.Headers.Append("X-Accel-Buffering", "no");
             return TypedResults.ServerSentEvents(stream);
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("Maximum"))
