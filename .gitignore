@@ -383,3 +383,4 @@ tasks/
 /artifacts
 /.local-nuget-feed
 /.github
+/.zcode
