@@ -391,3 +391,4 @@ tasks/
 /*.sh
 /logs_*/
 .playwright-cli/
+/.zcode
