@@ -125,6 +125,7 @@ public class SseGatewayIntegrationTests : IAsyncLifetime
         // Connect SSE client
         using var sseResponse = await _client!.GetAsync("/sse/test:e2e", HttpCompletionOption.ResponseHeadersRead);
         sseResponse.EnsureSuccessStatusCode();
+        sseResponse.Headers.GetValues("X-Accel-Buffering").Should().Contain("no");
 
         var stream = await sseResponse.Content.ReadAsStreamAsync();
         var reader = new StreamReader(stream);
