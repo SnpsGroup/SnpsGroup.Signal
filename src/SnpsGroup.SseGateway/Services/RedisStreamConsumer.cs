@@ -29,7 +29,9 @@ public class RedisStreamConsumer : BackgroundService, IRedisStreamConsumer
         _sessionManager = sessionManager;
         _options = options.Value;
         _logger = logger;
-        _instanceId = $"{Environment.MachineName}-{Guid.NewGuid():N}";
+        // Stable per replica: the deploy sets --hostname per host/environment, so the
+        // cursor survives restarts and each svcfabric replica keeps its own cursor key.
+        _instanceId = Environment.MachineName;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)

@@ -110,7 +110,7 @@ internal partial class Build
                 var rendered = template
                     .Replace("{{ENVIRONMENT_CAPITALIZED}}", envCaps)
                     .Replace("{{API_PORT}}", config.ApiExternalPort.ToString())
-                    .Replace("{{REDIS_CONNECTION_STRING}}", SanitizeSecretValue(allSecrets.GetValueOrDefault("redis-connection-string", "")))
+                    .Replace("{{REDIS_CONNECTION_STRING}}", SanitizeSecretValue(ResolveRedisConnectionString(envName, allSecrets)))
                     .Replace("{{API_KEY}}", allSecrets.GetValueOrDefault("api-key", ""))
                     .Replace("{{KEYCLOAK_URL}}", allSecrets.GetValueOrDefault("keycloak-url", ""))
                     .Replace("{{KEYCLOAK_REALM}}", allSecrets.GetValueOrDefault("keycloak-realm", "platform"))
@@ -123,6 +123,32 @@ internal partial class Build
                 Log.Information("Written {Env}", svc.Name + ".env");
             }
         });
+
+    /// <summary>
+    /// Resolves the Redis connection string for the SSE Gateway.
+    /// Production and staging read it from OpenBao at <c>secret/signal/{environment}/redis-connection-string</c>.
+    /// Development (QA) uses the local <c>shared-redis</c> container from Infrastructure-Common,
+    /// bypassing OpenBao so the deploy does not require external secret access.
+    /// </summary>
+    private string ResolveRedisConnectionString(string envName, IReadOnlyDictionary<string, string> secrets)
+    {
+        if (envName.Equals("development", StringComparison.OrdinalIgnoreCase))
+        {
+            Log.Information("Development environment: using shared-redis:6379 from local Infrastructure-Common (skipping OpenBao)");
+            return "shared-redis:6379";
+        }
+
+        var fromOpenBao = secrets.GetValueOrDefault("redis-connection-string", "");
+        if (string.IsNullOrEmpty(fromOpenBao))
+        {
+            throw new Exception(
+                $"OpenBao secret 'redis-connection-string' is missing at secret/signal/{envName}/. " +
+                $"Required for environment '{envName}'.");
+        }
+
+        Log.Information("{Env} environment: using redis-connection-string from OpenBao (secret/signal/{Env}/redis-connection-string)", envName, envName);
+        return fromOpenBao;
+    }
 
     /// <summary>
     /// Returns the host port the service should listen on with --network host.
@@ -172,13 +198,14 @@ internal partial class Build
 
     private Target Rollback => _ => _
         .Description("Rollback all services to latest-stable image tag")
-        .DependsOn(DockerLogin)
+        .DependsOn(DockerLogin, PrepareEnvironment)
         .Executes(async () =>
         {
             var env = DeploymentConfig.FromName(DeployEnvironment);
             var deployDir = RootDirectory / "deploy" / DeployEnvironment;
             Log.Warning("Rollback requested for environment {Env} — pulling latest-stable tags", DeployEnvironment);
 
+            var failedServices = new List<string>();
             foreach (var svc in ServiceDefinitions.All)
             {
                 var stableTag = $"{DockerRegistry}/{svc.ImageName}:latest-stable";
@@ -197,11 +224,17 @@ internal partial class Build
 
                     var healthy = await WaitForHealthy(svc, env, blueName, env.HealthCheckRetries, env.HealthCheckDelaySeconds);
                     Log.Information("Rollback of {Service} {Status}", svc.DisplayName, healthy ? "succeeded" : "failed");
+                    if (!healthy)
+                        failedServices.Add(svc.DisplayName);
                 }
                 catch (Exception ex)
                 {
                     Log.Error(ex, "Rollback failed for {Service} — manual intervention required", svc.DisplayName);
+                    failedServices.Add(svc.DisplayName);
                 }
             }
+
+            if (failedServices.Count > 0)
+                throw new Exception($"Rollback failed for: {string.Join(", ", failedServices)}");
         });
 }

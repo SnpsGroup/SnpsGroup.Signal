@@ -70,7 +70,6 @@ partial class Build
             }
 
             apiKey ??= EnvironmentInfo.GetVariable("DOCKER_REGISTRY_PASSWORD");
-            apiKey ??= SnpsGroup.Nuke.Target.Common.Constants.ProgetNugetApiKey;
 
             if (string.IsNullOrEmpty(apiKey))
                 throw new Exception("NuGet API key not found. Set NUGET_API_KEY env var or configure OpenBao signal/shared.");
